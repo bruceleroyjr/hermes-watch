@@ -53,6 +53,12 @@ Bluetooth in about a second and plays while the rest arrives (voice starts ~2-3 
 ~10 s for a long answer). Note that edge-tts is a
 cloud service: the answer text is sent to Microsoft to be spoken. With Voice off, nothing is synthesized.
 
+**Long questions.** A recording can run up to 90 s (it stops by itself; tap STOP sooner). zml sends a
+request's Bluetooth chunks back to back with no flow control, and a ~120 KB clip never reached the phone,
+so recordings over 24 KB go in pieces (`shared/pieces.js`, same request id, "Sending i of n" on the watch,
+each piece retried up to 4 times). The phone keeps the pieces and posts the whole clip when the last one
+arrives. Short questions are one piece, as before.
+
 ## Requirements
 
 - Amazfit Active 2 (or similar Zepp OS 4 watch) and the Zepp app on your phone

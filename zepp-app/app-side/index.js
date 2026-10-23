@@ -1,7 +1,9 @@
 /*
  * Side Service: runs inside the Zepp app on the iPhone and forwards the watch's requests to
  * the watch relay on the PC over Tailscale (relay.js).
- * - binary envelope (recording) -> POST /watch/ask {audio_b64}
+ * - binary envelope (recording) -> POST /watch/ask {audio_b64}; long ones come in pieces (part i
+ *   of n, shared/pieces.js): earlier pieces are kept and answered {ok, got}, the last one sends
+ *   the whole clip
  * - confirm {id, yes}           -> POST /watch/confirm
  * - result {job}                -> POST /watch/result {job}
  * - last                        -> GET /watch/last (reply missed while the watch app was closed)
@@ -22,7 +24,9 @@ import { TOKEN, RELAY } from './token'
 import { newRid, withTimeout } from '../shared/retry'
 import { onceBy } from '../shared/once'
 import { DIAG } from '../shared/debug'
+import { pieceStore } from '../shared/pieces'
 
+const pieces = pieceStore()
 const speechJobs = new Map() // speech id -> promise of {ok, error?}: each answer is fetched and sent once
 
 const UNREACHABLE = "Can't reach the PC (is Tailscale on?)"
@@ -76,7 +80,14 @@ function ask(buf) {
   } catch (e) {
     return Promise.resolve({ ok: false, error: 'The recording got garbled on the way. Try again.' })
   }
-  return call('POST', '/watch/ask', { audio_b64: base64(env.audio), rid: env.header.rid || newRid(), speak: !!env.header.speak })
+  const h = env.header
+  let audio = env.audio
+  if (h.parts > 1) {
+    audio = pieces.put(String(h.rid), h.part, h.parts, env.audio.slice()) // slice: keep a copy, not a view
+    if (h.part < h.parts) return Promise.resolve({ ok: true, got: h.part })
+    if (!audio) return Promise.resolve({ ok: false, error: `Part of the recording got lost (piece ${pieces.missing(String(h.rid)).join(', ')}). Try again.` })
+  }
+  return call('POST', '/watch/ask', { audio_b64: base64(audio), rid: h.rid || newRid(), speak: !!h.speak })
 }
 
 // Short status lines into the relay log (POST /watch/diag), because this side service's own

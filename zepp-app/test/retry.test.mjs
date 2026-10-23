@@ -138,3 +138,11 @@ test('real errors are not retried', async () => {
 test('rids differ', () => {
   assert.notStrictEqual(newRid(), newRid())
 })
+
+test('uploadAllowanceMs: longer recordings get more time to reach the phone', async () => {
+  const { uploadAllowanceMs } = await import('../shared/retry.js')
+  assert.strictEqual(uploadAllowanceMs(0), 0)
+  assert.strictEqual(uploadAllowanceMs(undefined), 0)
+  assert.strictEqual(uploadAllowanceMs(40000), 10000) // a 15 s clip: +10 s
+  assert.ok(uploadAllowanceMs(245000) >= 60000) // a 90 s clip: about a minute more
+})

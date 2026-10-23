@@ -1,5 +1,5 @@
 /*
- * Hermes on the watch: tap TALK, speak, tap STOP (stops by itself at 15 s). The recording
+ * Hermes on the watch: tap TALK, speak, tap STOP (stops by itself at 90 s). The recording
  * goes through the Zepp app on the phone to the PC (relay.js), which answers
  * with Hermes's reply, a Yes/No card for texts, emails and car commands, or a job id when
  * Hermes is slow (polled every 3 s for up to 10 min). Long answers scroll.
@@ -17,20 +17,22 @@ import { setPageBrightTime, resetPageBrightTime, pauseDropWristScreenOff, resetD
 import { Vibrator } from '@zos/sensor'
 import { BasePage } from '@zeppos/zml/base-page'
 import { buildEnvelope } from '../shared/envelope'
-import { untilPhoneWakes, phoneError, resendUntil, newRid } from '../shared/retry'
+import { untilPhoneWakes, phoneError, resendUntil, newRid, uploadAllowanceMs } from '../shared/retry'
 import { screenFor, pollStep, resumeFor, lastIsNew } from '../shared/screens'
 import { ringDots, dotColors, elapsedText, dotsText } from '../shared/spinner'
 import { DIAG } from '../shared/debug'
 import { speechQueue } from '../shared/speechqueue'
+import { splitAudio } from '../shared/pieces'
 
 const FILE = 'clip.opus'
-const MAX_REC_MS = 15000
+const MAX_REC_MS = 90000 // long questions are fine; the upload gets extra time (uploadAllowanceMs)
 const POLL_MS = 3000
 const WAKE_MS = 30000 // keep retrying while iOS wakes the Zepp app ("shake timeout")
 // The relay answers within 12 s, so a question with no reply after ASK_ATTEMPT_MS was lost between
 // the PC and the iPhone: the watch sends it again with the same request id (the relay returns the
 // reply it kept). Yes/No can take up to a minute (a text, the car).
 const ASK_ATTEMPT_MS = 25000
+const PIECE_TRIES = 4 // a piece of a long recording that failed or got no reply is sent again
 const CONFIRM_ATTEMPT_MS = 70000
 const REQUEST_BUDGET_MS = 150000
 const POLL_LIMIT_MS = 10 * 60 * 1000
@@ -380,8 +382,31 @@ Page(
         return this.finish({ ok: false, error: `Could not read the recording: ${errText(e)}` })
       }
       if (!audio) return this.finish({ ok: false, error: 'Nothing was recorded. Try again.' })
-      const envelope = buildEnvelope({ kind: 'ask', speak: this.state.voiceOn, rid: newRid() }, audio)
-      this.resendRequest(envelope, { contentType: 'bin', dataType: 'json' }, ASK_ATTEMPT_MS)
+      // Long recordings go in pieces (shared/pieces.js); the last piece is the question itself.
+      const rid = newRid()
+      const pieces = splitAudio(audio)
+      const n = pieces.length
+      const opts = { contentType: 'bin', dataType: 'json' }
+      const envelope = (i) => buildEnvelope(n > 1 ? { kind: 'ask', speak: this.state.voiceOn, rid, part: i + 1, parts: n }
+        : { kind: 'ask', speak: this.state.voiceOn, rid }, pieces[i])
+      const piece = (i, tries = 1) => {
+        this.show({ screen: 'thinking', heard: `Sending ${i + 1} of ${n}` })
+        const extra = uploadAllowanceMs(pieces[i].byteLength)
+        return this.phoneRequest(envelope(i), { ...opts, timeout: ASK_ATTEMPT_MS + extra })
+          .then((r) => (r && r.ok ? r : Promise.reject(new Error((r && r.error) || 'no reply'))))
+          .catch((e) => {
+            if (tries >= PIECE_TRIES || /shake timeout/i.test(errText(e))) throw e // phoneRequest already waited 30 s
+            return new Promise((resolve) => setTimeout(resolve, 1000)).then(() => piece(i, tries + 1))
+          })
+      }
+      const ask = () => {
+        if (n > 1) this.show({ screen: 'thinking', heard: `Sending ${n} of ${n}` })
+        const extra = uploadAllowanceMs(pieces[n - 1].byteLength)
+        return this.resendRequest(envelope(n - 1), opts, ASK_ATTEMPT_MS + extra, REQUEST_BUDGET_MS + 2 * extra)
+      }
+      let chain = Promise.resolve()
+      for (let i = 0; i < n - 1; i++) chain = chain.then(() => piece(i))
+      chain.then(ask)
         .then((r) => this.finish(r))
         .catch((e) => this.finish({ ok: false, error: phoneError(e) }))
     },
@@ -559,8 +584,8 @@ Page(
 
     // phoneRequest, sent again (same request id) when an attempt gets no reply in attemptMs or the
     // phone says it couldn't reach the PC ({retry: true}); the only place lost replies are retried.
-    resendRequest(req, opts, attemptMs) {
-      return resendUntil(() => this.phoneRequest(req, { ...opts, timeout: attemptMs }), { attemptMs, budgetMs: REQUEST_BUDGET_MS })
+    resendRequest(req, opts, attemptMs, budgetMs = REQUEST_BUDGET_MS) {
+      return resendUntil(() => this.phoneRequest(req, { ...opts, timeout: attemptMs }), { attemptMs, budgetMs })
     },
 
     // request() to the phone, retried for up to 30 s while iOS wakes the Zepp app ("shake timeout");

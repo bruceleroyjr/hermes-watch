@@ -74,3 +74,11 @@ export async function withRetry(attempt, { tries, budgetMs, now = Date.now }) {
   }
   return r
 }
+
+// Extra wait for a recording's trip over Bluetooth to the phone: the request timer runs while it
+// uploads (~9 KB/s measured; 4 KB/s allowed), so a 90 s clip (~245 KB) gets ~61 s more instead of
+// being "lost" at 25 s and sent again whole.
+export const UPLOAD_BYTES_PER_MS = 4
+export function uploadAllowanceMs(bytes) {
+  return Math.ceil((bytes || 0) / UPLOAD_BYTES_PER_MS)
+}
