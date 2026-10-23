@@ -27,6 +27,10 @@ import { splitAudio } from '../shared/pieces'
 const FILE = 'clip.opus'
 const MAX_REC_MS = 90000 // long questions are fine; the upload gets extra time (uploadAllowanceMs)
 const POLL_MS = 3000
+// A poll with no reply or error after this is abandoned and sent again: one once never ended (no
+// timeout fired), and every later tick was skipped - the watch sat on Still working for 6 min while
+// the answer waited on the PC.
+const POLL_STUCK_MS = 25000
 const WAKE_MS = 30000 // keep retrying while iOS wakes the Zepp app ("shake timeout")
 // The relay answers within 12 s, so a question with no reply after ASK_ATTEMPT_MS was lost between
 // the PC and the iPhone: the watch sends it again with the same request id (the relay returns the
@@ -551,17 +555,29 @@ Page(
       this.state.busy = true
       this.show(m)
       const started = Date.now()
-      let inFlight = false
+      let inFlight = 0 // when the current poll was sent (0: none)
+      let seq = 0
       let failures = 0
       this.state.poll = setInterval(() => {
-        if (inFlight) return
+        if (inFlight && Date.now() - inFlight < POLL_STUCK_MS) return
+        if (inFlight) {
+          seq++ // the stuck poll's late reply, if any, is ignored
+          const next = pollStep(null, failures)
+          if (next.done) {
+            this.cancelPoll()
+            return this.finish(null)
+          }
+          failures = next.failures
+        }
         if (Date.now() - started > POLL_LIMIT_MS) {
           this.cancelPoll()
           return this.finish({ ok: false, error: 'Hermes took more than 10 minutes. The answer may still come to Telegram.' })
         }
-        inFlight = true
+        inFlight = Date.now()
+        const mine = ++seq
         const step = (r) => {
-          inFlight = false
+          if (mine !== seq || !this.state.poll) return
+          inFlight = 0
           const next = pollStep(r, failures)
           if (!next.done) return (failures = next.failures)
           this.cancelPoll()

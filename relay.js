@@ -79,14 +79,14 @@ function createServer(opts) {
 
   // A Hermes turn, streamed: the text is collected, and approval requests (Claude Code edits and
   // builds, dangerous commands) are handed to onApproval while Hermes waits for the answer.
-  function askHermes(sessionId, userText, onApproval = () => {}) {
+  function askHermes(sessionId, userText, onApproval = () => {}, { confirmed = false } = {}) {
     let up;
     const promise = new Promise((resolve) => {
       let settled = false;
       const done = (r) => { if (!settled) { settled = true; resolve(r); } };
       const body = Buffer.from(JSON.stringify({ model: 'hermes-agent', stream: true, messages: [
         { role: 'system', content: watchSystemPrompt() },
-        { role: 'user', content: withWatchRules(userText) }] }));
+        { role: 'user', content: withWatchRules(userText, { confirmed }) }] }));
       up = http.request({ host: '127.0.0.1', port: opts.hermesPort, method: 'POST', path: '/v1/chat/completions', headers: {
         authorization: `Bearer ${opts.hermesKey}`, 'content-type': 'application/json', 'content-length': body.length,
         'x-hermes-session-id': sessionId } }, (res) => {
@@ -180,7 +180,7 @@ function createServer(opts) {
     return { ok: true, heard: entry.heard, kind: 'working', job, ...(entry.approved ? { note: BUILD_NOTE } : {}) };
   }
 
-  async function hermesTurn(heard, userText, started) {
+  async function hermesTurn(heard, userText, started, { confirmed = false } = {}) {
     const sessionId = currentSession();
     const job = crypto.randomBytes(9).toString('base64url');
     const entry = { heard, at: Date.now(), reply: null, card: null, approved: false, wake: null };
@@ -192,7 +192,7 @@ function createServer(opts) {
       entry.card = { ok: true, heard, kind: 'confirm', approve: true, text: truncateForHud(formatForHud(asked), WATCH_CHAR_BUDGET), id };
       log(`  approval asked (${ev.pattern_key || 'approval'}) card=${id} job=${job}`);
       if (entry.wake) entry.wake();
-    });
+    }, { confirmed });
     const cap = setTimeout(() => turn.cancel('stopped waiting after 30 min'), JOB_CAP_MS);
     turn.promise.then((done) => {
       clearTimeout(cap);
@@ -301,7 +301,7 @@ function createServer(opts) {
       return { ok: true, kind: 'answer', text: 'OK, not doing it.' };
     }
     if (action.kind === 'hermes') {
-      const reply = await hermesTurn('', 'yes, go ahead', Date.now());
+      const reply = await hermesTurn('', 'yes, go ahead', Date.now(), { confirmed: true }); // his Yes: do it now
       delete reply.heard;
       return reply;
     }

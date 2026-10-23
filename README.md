@@ -59,6 +59,13 @@ so recordings over 24 KB go in pieces (`shared/pieces.js`, same request id, "Sen
 each piece retried up to 4 times). The phone keeps the pieces and posts the whole clip when the last one
 arrives. Short questions are one piece, as before.
 
+**Slow answers and Yes/No.** While Hermes works, the watch polls every 3 s; a poll with no reply
+or error after 25 s is abandoned and sent again (one once never ended, and the watch sat on the
+waiting screen with the answer ready on the PC). Every watch message tells Hermes to propose texts,
+emails and car commands with a CONFIRM line instead of doing them; tapping Yes sends "yes, go ahead"
+with a different rule - do it now, then say it's done - and a text line repeating the CONFIRM
+question is dropped so the card shows it once.
+
 ## Requirements
 
 - Amazfit Active 2 (or similar Zepp OS 4 watch) and the Zepp app on your phone

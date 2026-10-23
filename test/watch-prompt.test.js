@@ -1,7 +1,7 @@
 // Run: node --test "test/*.test.js"
 const test = require('node:test');
 const assert = require('node:assert');
-const { watchSystemPrompt, withWatchRules } = require('../lib/watch-prompt');
+const { watchSystemPrompt, withWatchRules, splitConfirm } = require('../lib/watch-prompt');
 
 test('CONFIRM is only for actions; other follow-ups are plain questions', () => {
   for (const text of [watchSystemPrompt(), withWatchRules('hi')]) {
@@ -36,4 +36,20 @@ test('other questions do not get the email rule', () => {
 
 test('Claude Code changes are approved on the watch', () => {
   assert.match(watchSystemPrompt(), /Approve \/ Deny card for every change/);
+});
+
+test('Yes on the watch lets Hermes do the proposed action (the never-call rule made it refuse to send an email)', () => {
+  const text = withWatchRules('yes, go ahead', { confirmed: true });
+  assert.doesNotMatch(text, /Never call/);
+  assert.match(text, /tapped Yes/);
+  assert.match(text, /email_send_draft with confirmed=true/);
+  assert.match(text, /no CONFIRM line/);
+  assert.match(withWatchRules('send an email saying hi'), /Never call send_text/);
+});
+
+test('splitConfirm drops a last text line that repeats the CONFIRM question (the card showed it twice)', () => {
+  const reply = 'Draft email:\n\nSubject: Reminder\n\nPick up Alex at 4pm.\n\nShall I send this email?\n\nCONFIRM: Shall I send this email?';
+  assert.deepStrictEqual(splitConfirm(reply), { text: 'Draft email:\n\nSubject: Reminder\n\nPick up Alex at 4pm.', confirm: 'Shall I send this email?' });
+  assert.strictEqual(splitConfirm('Body.\nshall i send it\nCONFIRM: Shall I send it?').text, 'Body.');
+  assert.strictEqual(splitConfirm('Is 4pm right?\nCONFIRM: Send it?').text, 'Is 4pm right?');
 });
