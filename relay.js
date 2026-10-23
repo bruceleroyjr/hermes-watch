@@ -50,6 +50,7 @@ function createServer(opts) {
   const cancelRestart = opts.cancelRestart || cancelPcRestart;
   const deadlineMs = opts.deadlineMs || DEFAULT_DEADLINE_MS;
   const recordTurn = opts.recordTurn || (() => {});
+  const tts = opts.tts || ((text) => postTts(new URL('/tts', opts.sttUrl), text));
   const notify = opts.notify || (() => {});
   const jobs = new Map();
 
@@ -171,16 +172,11 @@ function createServer(opts) {
     });
   }
 
+  // A card stays until it is answered and a finished answer stays (until JOB_KEEP_MS), so a
+  // poll whose reply was lost on the way to the watch gets the same card or answer again.
   function collect(job, entry) {
-    if (entry.card) {
-      const card = entry.card;
-      entry.card = null;
-      return card;
-    }
-    if (entry.reply) {
-      jobs.delete(job);
-      return entry.reply;
-    }
+    if (entry.card) return entry.card;
+    if (entry.reply) return entry.reply;
     return { ok: true, heard: entry.heard, kind: 'working', job, ...(entry.approved ? { note: BUILD_NOTE } : {}) };
   }
 
@@ -215,6 +211,7 @@ function createServer(opts) {
   // Approve (once) or Deny a pending approval; Deny answers at once, Approve waits like a turn.
   async function approve(a, yes) {
     approvals.delete(a.id);
+    if (a.entry.card && a.entry.card.id === a.id) a.entry.card = null; // answered: not shown again
     const status = await answerApproval(a.runId, yes ? 'once' : 'deny', a.requestId);
     log(`  approval ${yes ? 'once' : 'deny'} -> ${status}`);
     if (status !== 200) return { ok: true, kind: 'answer', text: 'That approval expired. Ask again.' };
@@ -229,6 +226,7 @@ function createServer(opts) {
   function denyPending() {
     for (const [id, a] of approvals) {
       approvals.delete(id);
+      if (a.entry.card && a.entry.card.id === id) a.entry.card = null;
       answerApproval(a.runId, 'deny', a.requestId).then(st => log(`  approval card=${id} denied by a new question -> ${st}`));
     }
   }
@@ -314,16 +312,57 @@ function createServer(opts) {
     return answered('Yes', { ok: true, kind: 'answer', text: r.message });
   }
 
+  // Spoken answers (Voice on the watch): a reply the watch asked to hear gets a speech id and its MP3
+  // is started at once, in parallel with the text going out; the phone fetches it from
+  // GET /watch/speech?id=. Speech never delays an answer, and nothing is made while Voice is off.
+  const speeches = new Map(); // id -> {text, at, audio: Promise<Buffer>|null}
+
+  function withSpeech(reply, speak) {
+    if (!speak || !reply || !reply.ok || reply.approve || !['answer', 'confirm'].includes(reply.kind)) return reply;
+    const text = speechText(reply.text || '');
+    if (!text) return reply;
+    for (const [k, v] of speeches) if (Date.now() - v.at > JOB_KEEP_MS) speeches.delete(k);
+    const id = crypto.randomBytes(6).toString('hex');
+    // Started now, so it's (nearly) ready by the time the phone asks for it.
+    const audio = tts(text);
+    audio.catch(() => {}); // a failure is reported when the phone fetches it
+    speeches.set(id, { text, at: Date.now(), audio });
+    return { ...reply, speech: id };
+  }
+
+  function speechAudio(id, res, send) {
+    const entry = speeches.get(id);
+    if (!entry) return send(404, { ok: false, error: 'no such speech' });
+    const started = Date.now();
+    if (!entry.audio) entry.audio = tts(entry.text);
+    entry.audio.then((mp3) => {
+      log(`  speech ${id}: ${entry.text.length} chars -> ${mp3.length} B in ${Date.now() - started}ms`);
+      res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': mp3.length });
+      res.end(mp3);
+    }, (e) => {
+      entry.audio = null; // a later fetch tries again
+      log(`  speech ${id} failed: ${e.message}`);
+      send(502, { ok: false, error: `voice failed: ${e.message}` });
+    });
+  }
+
   const replies = new Map(); // "<path> <rid>" -> {promise, at}
 
-  function result(job) {
+  function result(job, speak) {
     for (const [id, j] of jobs) if (Date.now() - j.at > JOB_KEEP_MS) jobs.delete(id);
     const entry = jobs.get(job);
     if (!entry) return { ok: true, kind: 'answer', text: 'That answer is no longer here. Ask again.' };
     const reply = collect(job, entry);
     if (reply.kind === 'working') return { ok: true, kind: 'working', ...(reply.note ? { note: reply.note } : {}) };
     log(`  result collected job=${job}${reply.approve ? ' (approval card)' : ''}`);
-    return reply.heard === '' ? (({ heard, ...rest }) => rest)(reply) : reply;
+    const out = reply.heard === '' ? (({ heard, ...rest }) => rest)(reply) : reply;
+    if (!speak) return out;
+    // One speech id per reply, so polling again (after a lost reply) doesn't make the audio twice.
+    if (entry.spokenFrom !== reply) {
+      entry.spokenFrom = reply;
+      entry.spokenReply = withSpeech(out, true);
+    }
+    return entry.spokenReply;
   }
 
   function probe(host, port, p) {
@@ -341,7 +380,7 @@ function createServer(opts) {
       res.end(JSON.stringify(obj));
     };
     const url = new URL(req.url || '/', 'http://watch');
-    if (url.pathname !== '/watch/ask' && url.pathname !== '/watch/confirm') log(`${req.method} ${url.pathname}${url.search}`);
+    if (!['/watch/ask', '/watch/confirm', '/watch/diag'].includes(url.pathname)) log(`${req.method} ${url.pathname}${url.search}`);
     if (req.method === 'GET' && url.pathname === '/health') {
       const stt = new URL(opts.sttUrl);
       return Promise.all([probe(stt.hostname, stt.port, '/health'), probe('127.0.0.1', opts.hermesPort, '/health')])
@@ -351,11 +390,14 @@ function createServer(opts) {
     const good = Buffer.from(String(opts.token || ''));
     const given = Buffer.from(token);
     if (!opts.token || given.length !== good.length || !crypto.timingSafeEqual(given, good)) return send(401, { ok: false, error: 'bad token' });
-    if (req.method === 'GET' && url.pathname === '/watch/result') return send(200, result(url.searchParams.get('job') || ''));
+    if (req.method === 'GET' && url.pathname === '/watch/result') {
+      return send(200, result(url.searchParams.get('job') || '', url.searchParams.get('speak') === '1'));
+    }
+    if (req.method === 'GET' && url.pathname === '/watch/speech') return speechAudio(url.searchParams.get('id') || '', res, send);
     if (req.method === 'GET' && url.pathname === '/watch/last') {
       return send(200, last ? { ...last.reply, ago_ms: Date.now() - last.at } : { ok: true, kind: 'none' });
     }
-    if (req.method !== 'POST' || !['/watch/ask', '/watch/confirm', '/watch/result'].includes(url.pathname)) return send(404, { ok: false, error: 'not found' });
+    if (req.method !== 'POST' || !['/watch/ask', '/watch/confirm', '/watch/result', '/watch/diag'].includes(url.pathname)) return send(404, { ok: false, error: 'not found' });
     const chunks = [];
     let size = 0;
     req.on('data', (c) => { size += c.length; if (size <= MAX_BODY) chunks.push(c); });
@@ -364,7 +406,16 @@ function createServer(opts) {
       let body;
       try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { body = null; }
       if (!body || typeof body !== 'object') return send(400, { ok: false, error: 'bad request' });
-      if (url.pathname === '/watch/result') return send(200, result(String(body.job || '')));
+      // Status lines from the phone (side service) and the watch, whose own logs aren't visible
+      // from the PC: one short line each, so they can't inject fake log lines.
+      if (url.pathname === '/watch/diag') {
+        const from = body.from === 'watch' ? 'watch' : 'phone';
+        for (const e of (Array.isArray(body.events) ? body.events : []).slice(0, 20)) {
+          log(`  ${from}: ${String(e).replace(/\s+/g, ' ').trim().slice(0, 200)}`);
+        }
+        return send(200, { ok: true });
+      }
+      if (url.pathname === '/watch/result') return send(200, result(String(body.job || ''), body.speak));
       // The phone retries a request whose reply got lost with the same rid; it gets the same
       // reply (waiting for it if still running), so Hermes and actions run once.
       const key = typeof body.rid === 'string' && body.rid ? `${url.pathname} ${body.rid}` : '';
@@ -373,6 +424,7 @@ function createServer(opts) {
       if (reply) log(`  retry ${key}`);
       else {
         reply = (url.pathname === '/watch/ask' ? ask(body) : confirm(body)).then(remember)
+          .then(r => withSpeech(r, body.speak))
           .catch((e) => { log(`relay error: ${e.stack || e}`); return { ok: false, error: `Relay error: ${e.message}` }; });
         if (key) replies.set(key, { promise: reply, at: Date.now() });
       }
@@ -381,7 +433,47 @@ function createServer(opts) {
   });
 }
 
-module.exports = { createServer, newSessionId, DEFAULT_DEADLINE_MS };
+// What the watch reads out: bullets and lines become sentences, links go, and a long answer stops
+// at the last whole sentence within SPEECH_CHARS (the screen still has all of it).
+const SPEECH_CHARS = 400;
+function speechText(text) {
+  const plain = String(text)
+    .replace(/https?:\/\/\S+/g, '')
+    .split(/\r?\n/)
+    .map(l => l.replace(/^\s*[•\-*]\s*/, '').replace(/\s+([.,!?])/g, '$1').trim())
+    .filter(Boolean)
+    .map(l => (/[.!?:]$/.test(l) ? l : `${l}.`))
+    .join(' ')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+\./g, '.')
+    .trim();
+  if (plain.length <= SPEECH_CHARS) return plain;
+  const cut = plain.slice(0, SPEECH_CHARS);
+  const end = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('? '), cut.lastIndexOf('! '));
+  return end > 0 ? cut.slice(0, end + 1) : cut;
+}
+
+// POST {text} to the speech worker's /tts -> MP3 Buffer.
+function postTts(url, text) {
+  return new Promise((resolve, reject) => {
+    const body = Buffer.from(JSON.stringify({ text }));
+    const req = http.request({ host: url.hostname, port: url.port, path: url.pathname, method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': body.length } }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const out = Buffer.concat(chunks);
+        if (res.statusCode === 200) return resolve(out);
+        reject(new Error(`speech worker ${res.statusCode}: ${out.toString('utf8').slice(0, 120)}`));
+      });
+    });
+    req.setTimeout(30000, () => req.destroy(new Error('speech timed out')));
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
+module.exports = { createServer, newSessionId, speechText, DEFAULT_DEADLINE_MS };
 
 if (require.main === module) {
   const LOG_FILE = path.join(__dirname, 'relay.log');

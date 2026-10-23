@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createServer } = require('../relay');
+const { createServer, speechText } = require('../relay');
 const { fakeHermes, fakeStt, listen } = require('./fake-hermes');
 
 const TOKEN = 'test-watch-token';
@@ -15,6 +15,8 @@ async function setup(t, opts = {}) {
   const ran = [];
   const recorded = [];
   const notified = [];
+  const spoken = [];
+  const logged = [];
   const server = createServer({
     token: TOKEN,
     hermesKey: 'hermes-key',
@@ -25,9 +27,10 @@ async function setup(t, opts = {}) {
     pcHealth: async () => opts.health || '{}',
     cancelRestart: () => 'PC restart cancelled.',
     runAction: async (a) => { ran.push(a); return { ok: true, message: `Sent to ${a.contact}.` }; },
-    log: () => {},
+    log: line => logged.push(line),
     recordTurn: e => recorded.push(e),
     notify: text => notified.push(text),
+    tts: async (text) => { if (opts.ttsFails) throw new Error('voice down'); spoken.push(text); return Buffer.from(`MP3:${text}`); },
   });
   const port = await listen(server);
   t.after(() => { server.close(); stt.close(); if (hermes) hermes.close(); });
@@ -38,11 +41,103 @@ async function setup(t, opts = {}) {
     });
     return { status: res.status, type: res.headers.get('content-type'), json: await res.json().catch(() => null) };
   };
-  return { hermes, ran, recorded, notified, call, ask: b => call('POST', '/watch/ask', b).then(r => r.json),
+  const speech = async (id, token = TOKEN) => {
+    const res = await fetch(`http://127.0.0.1:${port}/watch/speech?id=${id}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    return { status: res.status, type: res.headers.get('content-type'), body: Buffer.from(await res.arrayBuffer()).toString() };
+  };
+  return { hermes, ran, recorded, notified, spoken, logged, call, speech, ask: b => call('POST', '/watch/ask', b).then(r => r.json),
     confirm: b => call('POST', '/watch/confirm', b).then(r => r.json) };
 }
 
 const sleep = ms => new Promise(res => setTimeout(res, ms));
+
+test('voice on: an answer gets a speech id; the MP3 is started right away and served from /watch/speech', async (t) => {
+  const { ask, speech, spoken } = await setup(t);
+  const r = await ask({ text: 'what time is it', speak: true });
+  assert.strictEqual(r.text, 'echo: what time is it');
+  assert.match(r.speech, /^[0-9a-f]{12}$/);
+  assert.deepStrictEqual(spoken, ['echo: what time is it.']); // already being made while the phone asks for it
+  const s = await speech(r.speech);
+  assert.deepStrictEqual(s, { status: 200, type: 'audio/mpeg', body: 'MP3:echo: what time is it.' });
+  await speech(r.speech);
+  assert.strictEqual(spoken.length, 1); // fetched twice, made once
+});
+
+test('diag: the phone and watch can write short status lines into the relay log (token needed)', async (t) => {
+  const { call, logged } = await setup(t);
+  const r = await call('POST', '/watch/diag', { from: 'phone', events: ['speech s1: download start', 'speech s1: sent\nfake line'] });
+  assert.deepStrictEqual(r.json, { ok: true });
+  assert.ok(logged.includes('  phone: speech s1: download start'));
+  assert.ok(logged.includes('  phone: speech s1: sent fake line')); // one line each, no injected log lines
+  assert.strictEqual((await call('POST', '/watch/diag', { from: 'phone', events: ['x'] }, 'wrong')).status, 401);
+  await call('POST', '/watch/diag', { from: 'watch', events: ['y'.repeat(500)] });
+  assert.ok(logged.includes(`  watch: ${'y'.repeat(200)}`)); // capped
+});
+
+test('a lost poll reply: polling again gets the same answer and the same speech id (spoken once)', async (t) => {
+  const { ask, call, spoken } = await setup(t, { deadlineMs: 500 });
+  const r = await ask({ text: 'slow question', speak: true });
+  await sleep(2000);
+  const first = (await call('POST', '/watch/result', { job: r.job, speak: true })).json;
+  const again = (await call('POST', '/watch/result', { job: r.job, speak: true })).json; // the first reply was lost
+  assert.strictEqual(first.text, 'echo: slow question');
+  assert.deepStrictEqual(again, first);
+  assert.strictEqual(spoken.length, 1);
+});
+
+test('a lost Approve card comes back on the next poll until it is answered', async (t) => {
+  const { ask, call, confirm } = await setup(t, { deadlineMs: 500 });
+  const r = await ask({ text: 'slow question' }); // occupies nothing; separate job below
+  const card = await ask({ text: 'build slow thing' });
+  assert.strictEqual(card.approve, true);
+  const done = await confirm({ id: card.id, yes: true });
+  assert.strictEqual(done.kind, 'working');
+  const polled = (await call('POST', '/watch/result', { job: done.job })).json;
+  assert.strictEqual(polled.kind, 'working'); // the answered card is not shown again
+  await sleep(2500);
+  assert.strictEqual((await call('POST', '/watch/result', { job: done.job })).json.text, 'Built: build slow thing');
+  assert.ok(r.job);
+});
+
+test('voice off: no speech id, nothing spoken', async (t) => {
+  const { ask } = await setup(t);
+  assert.strictEqual((await ask({ text: 'what time is it' })).speech, undefined);
+});
+
+test('voice: Yes/No cards and their results are spoken; Approve cards are not', async (t) => {
+  const { ask, confirm } = await setup(t);
+  const card = await ask({ text: 'text Alex saying hi', speak: true });
+  assert.ok(card.speech);
+  assert.ok((await confirm({ id: card.id, yes: true, speak: true })).speech);
+  const approve = await ask({ text: 'build a tide job', speak: true });
+  assert.strictEqual(approve.approve, true);
+  assert.strictEqual(approve.speech, undefined);
+  await confirm({ id: approve.id, yes: false }); // let the fake Hermes finish
+});
+
+test('voice: a slow answer is spoken when the poll asks for it', async (t) => {
+  const { ask, call } = await setup(t, { deadlineMs: 500 });
+  const r = await ask({ text: 'slow question', speak: true });
+  assert.strictEqual(r.kind, 'working');
+  await sleep(2000);
+  assert.ok((await call('POST', '/watch/result', { job: r.job, speak: true })).json.speech);
+});
+
+test('voice: unknown id -> 404, voice service down -> 502, needs the token', async (t) => {
+  const { ask, speech } = await setup(t, { ttsFails: true });
+  assert.strictEqual((await speech('nope')).status, 404);
+  const r = await ask({ text: 'hello', speak: true });
+  assert.strictEqual((await speech(r.speech)).status, 502);
+  assert.strictEqual((await speech(r.speech, 'wrong')).status, 401);
+});
+
+test('speechText: bullets and links become plain sentences; long answers stop at a sentence', () => {
+  assert.strictEqual(speechText('Today:\n• Dentist 3 PM\n• Gym at 6. See https://x.example/a'), 'Today: Dentist 3 PM. Gym at 6. See.');
+  const long = 'First sentence is here. '.repeat(30).trim();
+  const said = speechText(long);
+  assert.ok(said.length <= 400 && said.endsWith('here.'), said);
+  assert.strictEqual(speechText('x'.repeat(500)).length, 400);
+});
 
 test('Hermes turns are streamed (so approvals can reach the watch)', async (t) => {
   const { ask, hermes } = await setup(t);

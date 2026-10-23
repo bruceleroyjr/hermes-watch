@@ -17,6 +17,27 @@ import stt_worker  # noqa: E402
 FIXTURE = (HERE / "fixtures" / "weather.opus").read_bytes()
 
 
+class WatchMp3(unittest.TestCase):
+    """Spoken answers: small mono MP3s the watch's Player can play (MP3 only; Opus must be recorded on the watch)."""
+
+    def test_encode_round_trip(self):
+        pcm = stt_worker.decode(FIXTURE)
+        mp3 = stt_worker.encode_mp3(pcm)
+        self.assertTrue(mp3[:3] == b"ID3" or (mp3[0] == 0xFF and mp3[1] & 0xE0 == 0xE0), mp3[:4])
+        back = stt_worker.decode_audio(mp3)
+        self.assertAlmostEqual(len(back) / 16000, len(pcm) / 16000, delta=0.3)
+
+    def test_small_enough_for_bluetooth(self):
+        pcm = stt_worker.decode(FIXTURE)
+        mp3 = stt_worker.encode_mp3(pcm)
+        self.assertLess(len(mp3) / (len(pcm) / 16000), 2400)  # bytes per second of speech (~16 kbps)
+
+    @unittest.skipUnless(__import__("os").environ.get("TTS_LIVE") == "1", "set TTS_LIVE=1 (needs the internet)")
+    def test_speak_live(self):
+        mp3 = stt_worker.speak("Hello from Hermes.")
+        self.assertGreater(len(stt_worker.decode_audio(mp3)) / 16000, 0.5)
+
+
 class SplitPackets(unittest.TestCase):
     def test_split_packets_fixture(self):
         packets = stt_worker.split_packets(FIXTURE)

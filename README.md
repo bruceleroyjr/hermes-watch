@@ -8,7 +8,9 @@ Built for the Amazfit Active 2 (Zepp OS); other round Zepp OS 4 watches should n
 
 ## What it does
 
-- **Voice in, text out.** The watch records Opus audio; your PC transcribes it with Whisper and asks Hermes.
+- **Voice in, text and voice out.** The watch records Opus audio; your PC transcribes it with Whisper and asks
+  Hermes. The answer appears as text first, then the watch reads it out (a **Voice on/off** button turns this
+  off). Speech never delays the text: it is made in parallel and follows 1-3 s later for normal answers.
 - **Long conversations.** Every question continues the same Hermes session until 6 idle hours pass, or you
   tap **New chat** or say "start new session".
 - **Approve / Deny on the watch.** When Hermes asks for approval (for example Claude Code wanting to edit
@@ -35,6 +37,18 @@ watch app (Zepp OS)
 Hermes turns are streamed so the relay can see `approval.request` events and turn them into watch cards; the
 choice goes back with `POST /v1/runs/{run_id}/approval`. Answers that take longer than 12 s become a job the
 watch polls, because the phone's network calls drop replies that take 20 s or more.
+
+**Lost replies.** iOS sometimes drops a reply between the PC and the phone without failing the request, and it
+pauses the Zepp app's timers while the phone is locked. So the *watch* owns retries: every request carries a
+request id, the watch resends it after 25 s with no reply (70 s for Yes/No), and the relay answers a repeated
+id with the reply it already has, so Hermes never runs a question twice. Finished answers and Approve cards
+are kept until answered (or 30 min), so a lost poll reply just gets the same answer again.
+
+**Spoken answers.** With Voice on, replies carry a speech id and the relay starts the MP3 right away
+(`stt_worker.py` `POST /tts`: Microsoft's neural voices via [edge-tts](https://github.com/rany2/edge-tts),
+re-encoded to 16 kHz mono 16 kbps). The phone fetches it as soon as the reply passes through and sends it to
+the watch with zml file transfer; the watch plays it with the media Player (MP3 only). Note that edge-tts is a
+cloud service: the answer text is sent to Microsoft to be spoken. With Voice off, nothing is synthesized.
 
 ## Requirements
 
@@ -83,6 +97,10 @@ All but `/health` need `Authorization: Bearer <token>`.
 - `POST /watch/confirm` `{id, yes}` -> the next reply (Yes/No cards last 60 s, Approve cards ~5 min)
 - `GET /watch/result?job=` -> `{kind: working}` until a slow answer (or the next Approve card) is ready
 - `GET /watch/last` -> the latest reply plus `ago_ms`, for a watch that closed mid-question
+- `GET /watch/speech?id=` -> the spoken answer as `audio/mpeg` (ask/confirm/result with `speak: true` add `speech`)
+- `POST /watch/diag` `{from, events}` -> one-line status reports into `relay.log`; the watch and phone only
+  send them when `zepp-app/shared/debug.js` sets `DIAG = true` (handy because the phone's logs can't be read
+  from the PC)
 - `GET /health` -> `{ok, stt, hermes}`
 
 ## Security notes
@@ -98,6 +116,8 @@ All but `/health` need `Authorization: Bearer <token>`.
 - **"The phone isn't answering" / "shake timeout"**: Bluetooth is up but iOS put the Zepp app to sleep. Open
   Zepp on the phone; turn on Background App Refresh for it. The watch already retries for 30 s.
 - **Nothing reaches the PC**: check that the phone is connected to Tailscale (`tailscale ping <phone>`).
+- **Voice is silent or late**: set `DIAG = true` in `zepp-app/shared/debug.js`, reinstall, and read the
+  `phone:` / `watch:` lines in `relay.log` (download, Bluetooth transfer, file arrived, player).
 - **Logs**: `relay.log` (every request), `stt/stt.log`.
 
 ## Tests

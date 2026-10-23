@@ -5,6 +5,12 @@ import { screenFor, pollStep, resumeFor, lastIsNew, RESUME_MS, CARD_MS, APPROVE_
 
 const NOW = 1_800_000_000_000
 
+test('a spoken reply keeps its speech id (answers and Yes/No cards)', () => {
+  assert.deepStrictEqual(screenFor({ ok: true, kind: 'answer', text: 'Hi', speech: 's1' }),
+    { screen: 'answer', heard: '', text: 'Hi', speech: 's1' })
+  assert.strictEqual(screenFor({ ok: true, kind: 'confirm', text: 'Text Alex: hi?', id: 'c', speech: 's2' }).speech, 's2')
+})
+
 test('approval card keeps approve; working keeps the relay note', () => {
   assert.deepStrictEqual(screenFor({ ok: true, kind: 'confirm', approve: true, text: 'Claude Code wants to change files', id: 'a1' }),
     { screen: 'confirm', heard: '', text: 'Claude Code wants to change files', id: 'a1', approve: true })
@@ -33,10 +39,10 @@ test('resume: an answer comes back as it was', () => {
 })
 
 test('resume: a fresh Yes/No card comes back; an expired one becomes a plain answer', () => {
-  const model = { screen: 'confirm', heard: 'You said: text wife', text: 'Text alex: hi?', id: 'c1' }
+  const model = { screen: 'confirm', heard: 'You said: text alex', text: 'Text alex: hi?', id: 'c1' }
   assert.deepStrictEqual(resumeFor({ at: NOW - 10000, model }, NOW), { show: model })
   assert.deepStrictEqual(resumeFor({ at: NOW - CARD_MS - 1, model }, NOW),
-    { show: { screen: 'answer', heard: 'You said: text wife', text: 'Text alex: hi?\n(That card expired - tap TALK to answer.)' } })
+    { show: { screen: 'answer', heard: 'You said: text alex', text: 'Text alex: hi?\n(That card expired - tap TALK to answer.)' } })
 })
 
 test('resume: thinking or working -> ask the PC for the reply it kept', () => {

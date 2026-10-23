@@ -1,7 +1,8 @@
 """Speech-to-text worker for the Hermes watch relay (relay.js).
 
 POST /stt with the watch recorder's bytes -> {"text", "seconds", "level_db", "ms"}.
-GET /health -> {"ok": true} once Whisper is loaded. Listens on 127.0.0.1:8797 only.
+GET /health -> {"ok": true} once Whisper is loaded. POST /tts {"text"} -> MP3 for the watch speaker.
+Listens on 127.0.0.1:8797 only.
 
 The Zepp OS Recorder (codec.OPUS) writes no container: each packet is
 [u32 BE length][u32 BE encoder final range][packet] (libopus opus_demo layout), so the
@@ -152,6 +153,56 @@ def level_db(pcm):
     return round(20 * np.log10(rms), 1) if rms > 0 else -99.0
 
 
+# --- Spoken answers: text -> small MP3 for the watch ---------------------------------
+# Microsoft's neural voices via edge-tts (free, cloud), re-encoded to 16 kHz mono ~16 kbps so a
+# 15 s answer is ~30 KB over Bluetooth. The watch's Player plays MP3 (Opus only if recorded on it).
+VOICE = os.environ.get("TTS_VOICE", "en-US-AriaNeural")
+MP3_BITRATE = 16000
+
+
+def decode_audio(data):
+    """Any audio file (MP3, WAV, Ogg) -> 16 kHz mono int16 samples."""
+    out = []
+    resampler = av.AudioResampler(format="s16", layout="mono", rate=RATE)
+    with av.open(io.BytesIO(data)) as c:
+        for frame in c.decode(audio=0):
+            for f in resampler.resample(frame):
+                out.append(f.to_ndarray().reshape(-1))
+    for f in resampler.resample(None):
+        out.append(f.to_ndarray().reshape(-1))
+    return np.concatenate(out).astype(np.int16) if out else np.zeros(0, np.int16)
+
+
+def encode_mp3(pcm):
+    """16 kHz mono int16 samples -> MP3 bytes."""
+    buf = io.BytesIO()
+    with av.open(buf, "w", format="mp3") as c:
+        s = c.add_stream("libmp3lame", rate=RATE)
+        s.layout = "mono"
+        s.bit_rate = MP3_BITRATE
+        frame = av.AudioFrame.from_ndarray(pcm.reshape(1, -1).astype(np.int16), format="s16", layout="mono")
+        frame.sample_rate = RATE
+        for pkt in s.encode(frame):
+            c.mux(pkt)
+        for pkt in s.encode(None):
+            c.mux(pkt)
+    return buf.getvalue()
+
+
+def speak(text):
+    import asyncio
+    import edge_tts
+
+    async def run():
+        chunks = []
+        async for part in edge_tts.Communicate(text, VOICE).stream():
+            if part["type"] == "audio":
+                chunks.append(part["data"])
+        return b"".join(chunks)
+
+    return encode_mp3(decode_audio(asyncio.run(run())))
+
+
 # --- HTTP ---------------------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
@@ -169,6 +220,8 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(404, {"error": "not found"})
 
     def do_POST(self):
+        if self.path == "/tts":
+            return self.tts()
         if self.path != "/stt":
             return self.reply(404, {"error": "not found"})
         size = int(self.headers.get("Content-Length") or 0)
@@ -189,6 +242,28 @@ class Handler(BaseHTTPRequestHandler):
             (CAPTURES / f"{datetime.now():%Y%m%d-%H%M%S}.opus").write_bytes(data)
         log(f"stt {result['seconds']}s {result['level_db']}dB {result['ms']}ms: {len(text)} chars")
         self.reply(200, result)
+
+    # POST /tts {"text"} -> audio/mpeg
+    def tts(self):
+        size = int(self.headers.get("Content-Length") or 0)
+        try:
+            text = str(json.loads(self.rfile.read(size))["text"]).strip()[:2000]
+        except Exception:
+            return self.reply(400, {"error": "send {\"text\": ...}"})
+        if not text:
+            return self.reply(400, {"error": "empty text"})
+        t0 = time.time()
+        try:
+            mp3 = speak(text)
+        except Exception as e:  # network or voice service trouble
+            log(f"tts failed: {e!r}")
+            return self.reply(502, {"error": f"speech failed: {e}"})
+        log(f"tts {len(text)} chars -> {len(mp3)} B in {int((time.time() - t0) * 1000)}ms")
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Length", str(len(mp3)))
+        self.end_headers()
+        self.wfile.write(mp3)
 
     def log_message(self, *args):
         pass
