@@ -1,0 +1,10 @@
+{
+  "token": "long-random-string-shared-by-the-watch-app-and-the-relay",
+  "relayUrl": "https://your-pc.your-tailnet.ts.net:8453",
+  "userName": "Sam",
+  "timeZones": [
+    { "zone": "America/New_York", "label": "ET" }
+  ],
+  "defaultLocation": "Boston, MA",
+  "memoryFile": ""
+}

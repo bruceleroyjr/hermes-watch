@@ -1,0 +1,35 @@
+{
+  "configVersion": "v3",
+  "app": {
+    "appId": 1000001,
+    "appName": "Hermes",
+    "appType": "app",
+    "version": { "code": 1, "name": "1.0.0" },
+    "icon": "icon.png",
+    "vender": "your-name",
+    "description": "Talk to Hermes from the watch"
+  },
+  "permissions": ["data:os.device.info", "device:os.mic", "device:os.local_storage"],
+  "runtime": {
+    "apiVersion": { "compatible": "3.0", "target": "4.2", "minVersion": "3.0" }
+  },
+  "targets": {
+    "active2": {
+      "module": {
+        "page": { "pages": ["page/index"] },
+        "app-side": { "path": "app-side/index" }
+      },
+      "platforms": [
+        { "name": "active2", "deviceSource": 8913155 },
+        { "name": "active2", "deviceSource": 8913159 },
+        { "name": "active2", "deviceSource": 10092803 },
+        { "name": "active2", "deviceSource": 10092807 },
+        { "name": "active2", "deviceSource": 10617091 }
+      ],
+      "designWidth": 466
+    }
+  },
+  "i18n": { "en-US": { "appName": "Hermes" } },
+  "defaultLanguage": "en-US",
+  "debug": false
+}

@@ -1,0 +1,16 @@
+{
+  "name": "hermes-watch-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hermes on the Amazfit Active 2",
+  "scripts": {
+    "build": "zeus build",
+    "preview": "zeus preview"
+  },
+  "dependencies": {
+    "@zeppos/zml": "^0.0.43"
+  },
+  "devDependencies": {
+    "@zeppos/device-types": "^4.0.0"
+  }
+}

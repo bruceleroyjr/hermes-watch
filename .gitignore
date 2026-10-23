@@ -1,0 +1,13 @@
+# Secrets and personal state - never commit these
+config.json
+zepp-app/app-side/token.js
+session.json
+turns.jsonl
+*.log
+.env
+
+# Build output and dependencies
+node_modules/
+zepp-app/dist/
+stt/.venv/
+__pycache__/
