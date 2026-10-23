@@ -1,7 +1,7 @@
 // Run: node --test "test/*.test.js"
 const test = require('node:test');
 const assert = require('node:assert');
-const { parseAction, createPending, takePending, teslaMessage, CONFIRM_TTL_MS } = require('../lib/actions');
+const { parseAction, createPending, takePending, teslaMessage, CONFIRM_TTL_MS, HERMES_CARD_TTL_MS } = require('../lib/actions');
 
 const texts = [
   ['text Alex saying I love you', 'alex', 'I love you'],
@@ -100,4 +100,18 @@ test('a refused car command gives the reason', () => {
 test('anything else is shown as it came, cut to 200 characters', () => {
   assert.strictEqual(teslaMessage('tesla_unlock', 'Tesla proxy is not running'), 'Tesla proxy is not running');
   assert.strictEqual(teslaMessage('tesla_unlock', 'x'.repeat(300)).length, 200);
+});
+
+test('a Hermes question card lasts 5 min (60 s ran out while a long answer was read and spoken)', () => {
+  assert.strictEqual(HERMES_CARD_TTL_MS, 5 * 60 * 1000);
+  const id = createPending({ kind: 'hermes', question: 'Send it?' }, 1000);
+  assert.deepStrictEqual(takePending(id, 1000 + 77000), { kind: 'hermes', question: 'Send it?' });
+  const late = createPending({ kind: 'hermes', question: 'Send it?' }, 1000);
+  assert.strictEqual(takePending(late, 1000 + HERMES_CARD_TTL_MS + 1), null);
+});
+
+test('an instant action card (car, text) still expires after 60 s, even when Hermes cards are kept', () => {
+  createPending({ kind: 'hermes', question: 'Send it?' }, 1000);
+  const id = createPending(parseAction('unlock the car'), 1000);
+  assert.strictEqual(takePending(id, 1000 + 77000), null);
 });

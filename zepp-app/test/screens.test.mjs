@@ -113,3 +113,10 @@ test('poll: an answer or a real error ends it', () => {
   const e = { ok: false, error: 'The watch token was rejected by the PC.' }
   assert.deepStrictEqual(pollStep(e, 0), { done: true, reply: e })
 })
+
+test('a card keeps the relay\'s lifetime (Hermes questions: 5 min) for screens and reopening', () => {
+  const m = screenFor({ ok: true, kind: 'confirm', text: 'Add it?', id: 'c1', ttlMs: 300000 })
+  assert.strictEqual(m.ttlMs, 300000)
+  assert.deepStrictEqual(resumeFor({ at: NOW - 120000, model: m }, NOW), { show: m })
+  assert.strictEqual(resumeFor({ at: NOW - 300000, model: m }, NOW).show.screen, 'answer')
+})

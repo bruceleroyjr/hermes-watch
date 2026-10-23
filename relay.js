@@ -151,7 +151,7 @@ function createServer(opts) {
     const body = truncateForHud(formatForHud(text), WATCH_CHAR_BUDGET);
     if (!confirm) return { ok: true, heard, kind: 'answer', text: body };
     const id = actions.createPending({ kind: 'hermes', question: confirm });
-    return { ok: true, heard, kind: 'confirm', text: body ? `${body}\n${confirm}` : confirm, id };
+    return { ok: true, heard, kind: 'confirm', text: body ? `${body}\n${confirm}` : confirm, id, ttlMs: actions.HERMES_CARD_TTL_MS };
   }
 
   // Every Hermes turn is a job entry. The watch gets whichever comes first: the answer, an Approve

@@ -64,7 +64,8 @@ or error after 25 s is abandoned and sent again (one once never ended, and the w
 waiting screen with the answer ready on the PC). Every watch message tells Hermes to propose texts,
 emails and car commands with a CONFIRM line instead of doing them; tapping Yes sends "yes, go ahead"
 with a different rule - do it now, then say it's done - and a text line repeating the CONFIRM
-question is dropped so the card shows it once.
+question is dropped so the card shows it once. Hermes's Yes/No cards stay valid for 5 minutes (time to
+read and hear a long answer); cards for actions the relay runs itself (car commands, texts) expire after 60 s.
 
 ## Requirements
 
