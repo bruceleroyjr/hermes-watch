@@ -53,3 +53,9 @@ test('splitConfirm drops a last text line that repeats the CONFIRM question (the
   assert.strictEqual(splitConfirm('Body.\nshall i send it\nCONFIRM: Shall I send it?').text, 'Body.');
   assert.strictEqual(splitConfirm('Is 4pm right?\nCONFIRM: Send it?').text, 'Is 4pm right?');
 });
+
+test('proposals read as ready to go, not "I can\'t send directly" (2026-10-23 card wording)', () => {
+  const text = withWatchRules('send an email to myself saying hi');
+  assert.match(text, /Ready to send/);
+  assert.match(text, /never say you cannot do it or need approval/);
+});

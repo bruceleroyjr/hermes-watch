@@ -17,7 +17,7 @@ import { setPageBrightTime, resetPageBrightTime, pauseDropWristScreenOff, resetD
 import { Vibrator } from '@zos/sensor'
 import { BasePage } from '@zeppos/zml/base-page'
 import { buildEnvelope } from '../shared/envelope'
-import { untilPhoneWakes, phoneError, resendUntil, newRid, uploadAllowanceMs } from '../shared/retry'
+import { untilPhoneWakes, phoneError, resendUntil, newRid, uploadAllowanceMs, ASK_ATTEMPT_MS, confirmAttemptMs } from '../shared/retry'
 import { screenFor, pollStep, resumeFor, lastIsNew } from '../shared/screens'
 import { ringDots, dotColors, elapsedText, dotsText } from '../shared/spinner'
 import { DIAG } from '../shared/debug'
@@ -32,12 +32,9 @@ const POLL_MS = 3000
 // the answer waited on the PC.
 const POLL_STUCK_MS = 25000
 const WAKE_MS = 30000 // keep retrying while iOS wakes the Zepp app ("shake timeout")
-// The relay answers within 12 s, so a question with no reply after ASK_ATTEMPT_MS was lost between
-// the PC and the iPhone: the watch sends it again with the same request id (the relay returns the
-// reply it kept). Yes/No can take up to a minute (a text, the car).
-const ASK_ATTEMPT_MS = 25000
+// A request with no reply after ASK_ATTEMPT_MS / confirmAttemptMs (shared/retry.js) was lost between
+// the PC and the iPhone: the watch sends it again with the same request id.
 const PIECE_TRIES = 4 // a piece of a long recording that failed or got no reply is sent again
-const CONFIRM_ATTEMPT_MS = 70000
 const REQUEST_BUDGET_MS = 150000
 const POLL_LIMIT_MS = 10 * 60 * 1000
 const WAIT_BRIGHT_MS = 10 * 60 * 1000 // screen stays on while recording and waiting
@@ -251,8 +248,8 @@ Page(
         const left = Math.round((W - 2 * bw - gap) / 2)
         // Approve cards are Hermes asking for approval (Claude Code changes); Approve = this one time.
         const [yes, no] = m.approve ? ['Approve', 'Deny'] : ['Yes', 'No']
-        this.button(y + 24, yes, GREEN, () => this.confirm(m.id, true, yes), bw, left)
-        this.button(y + 24, no, GREY, () => this.confirm(m.id, false, no), bw, left + bw + gap)
+        this.button(y + 24, yes, GREEN, () => this.confirm(m.id, true, yes, m), bw, left)
+        this.button(y + 24, no, GREY, () => this.confirm(m.id, false, no, m), bw, left + bw + gap)
         y += 24 + 80
         // Any other answer is spoken: it goes to Hermes as the next message and the card lapses.
         y = this.button(y + 16, 'Reply', BLUE, talk, 2 * bw + gap, left)
@@ -632,13 +629,13 @@ Page(
         })
     },
 
-    confirm(confirmId, yes, label) {
+    confirm(confirmId, yes, label, card) {
       if (this.state.busy) return
       this.state.busy = true
       this.keepAwake(WAIT_BRIGHT_MS)
       this.state.waitSince = Date.now()
       this.show({ screen: 'thinking', heard: label || (yes ? 'Yes' : 'No') })
-      this.resendRequest({ method: 'confirm', params: { id: confirmId, yes, speak: this.state.voiceOn, rid: newRid() } }, {}, CONFIRM_ATTEMPT_MS)
+      this.resendRequest({ method: 'confirm', params: { id: confirmId, yes, speak: this.state.voiceOn, rid: newRid() } }, {}, confirmAttemptMs(card))
         .then((r) => this.finish(r))
         .catch((e) => this.finish({ ok: false, error: phoneError(e) }))
     },

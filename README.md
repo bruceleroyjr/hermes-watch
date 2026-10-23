@@ -40,7 +40,8 @@ watch polls, because the phone's network calls drop replies that take 20 s or mo
 
 **Lost replies.** iOS sometimes drops a reply between the PC and the phone without failing the request, and it
 pauses the Zepp app's timers while the phone is locked. So the *watch* owns retries: every request carries a
-request id, the watch resends it after 25 s with no reply (70 s for Yes/No), and the relay answers a repeated
+request id, the watch resends it after 17 s with no reply (the relay always answers within 12 s; 70 s for car
+and text Yes/No, which run on the PC), and the relay answers a repeated
 id with the reply it already has, so Hermes never runs a question twice. Finished answers and Approve cards
 are kept until answered (or 30 min), so a lost poll reply just gets the same answer again.
 

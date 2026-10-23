@@ -146,3 +146,12 @@ test('uploadAllowanceMs: longer recordings get more time to reach the phone', as
   assert.strictEqual(uploadAllowanceMs(40000), 10000) // a 15 s clip: +10 s
   assert.ok(uploadAllowanceMs(245000) >= 60000) // a 90 s clip: about a minute more
 })
+
+test('confirmAttemptMs: Hermes and Approve cards are resent after 17 s, car and text cards after 70 s', async () => {
+  const { confirmAttemptMs, ASK_ATTEMPT_MS } = await import('../shared/retry.js')
+  assert.strictEqual(ASK_ATTEMPT_MS, 17000)
+  assert.strictEqual(confirmAttemptMs({ id: 'c', ttlMs: 300000 }), 17000)
+  assert.strictEqual(confirmAttemptMs({ id: 'c', approve: true }), 17000)
+  assert.strictEqual(confirmAttemptMs({ id: 'c' }), 70000) // unlock the car, send a text
+  assert.strictEqual(confirmAttemptMs(undefined), 70000)
+})

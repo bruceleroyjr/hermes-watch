@@ -82,3 +82,14 @@ export const UPLOAD_BYTES_PER_MS = 4
 export function uploadAllowanceMs(bytes) {
   return Math.ceil((bytes || 0) / UPLOAD_BYTES_PER_MS)
 }
+
+// How long the watch waits for a reply before sending the request again (same rid; the relay
+// returns the reply it kept). The relay answers within its 12 s deadline - an answer, a card or a
+// job id - so ASK_ATTEMPT_MS after that the reply was lost on the iPhone (it was, 4 times on
+// 2026-10-23, and the watch then waited 25 s). Yes/No on a Hermes card (ttlMs) or an Approve card
+// goes through Hermes the same way; car commands and texts run on the PC and can take ~60 s.
+export const ASK_ATTEMPT_MS = 17000
+export const ACTION_ATTEMPT_MS = 70000
+export function confirmAttemptMs(card) {
+  return card && (card.ttlMs || card.approve) ? ASK_ATTEMPT_MS : ACTION_ATTEMPT_MS
+}
