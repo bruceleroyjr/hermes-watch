@@ -11,6 +11,11 @@ test('a spoken reply keeps its speech id (answers and Yes/No cards)', () => {
   assert.strictEqual(screenFor({ ok: true, kind: 'confirm', text: 'Text Alex: hi?', id: 'c', speech: 's2' }).speech, 's2')
 })
 
+test('a long spoken reply keeps how many clips it has', () => {
+  assert.deepStrictEqual(screenFor({ ok: true, kind: 'answer', text: 'Long...', speech: 's3', speechParts: 2 }),
+    { screen: 'answer', heard: '', text: 'Long...', speech: 's3', speechParts: 2 })
+})
+
 test('approval card keeps approve; working keeps the relay note', () => {
   assert.deepStrictEqual(screenFor({ ok: true, kind: 'confirm', approve: true, text: 'Claude Code wants to change files', id: 'a1' }),
     { screen: 'confirm', heard: '', text: 'Claude Code wants to change files', id: 'a1', approve: true })

@@ -21,6 +21,7 @@ import { untilPhoneWakes, phoneError, resendUntil, newRid } from '../shared/retr
 import { screenFor, pollStep, resumeFor, lastIsNew } from '../shared/screens'
 import { ringDots, dotColors, elapsedText, dotsText } from '../shared/spinner'
 import { DIAG } from '../shared/debug'
+import { speechQueue } from '../shared/speechqueue'
 
 const FILE = 'clip.opus'
 const MAX_REC_MS = 15000
@@ -110,7 +111,7 @@ function textHeight(text, size) {
 Page(
   BasePage({
     state: { widgets: [], recorder: null, recording: false, busy: false, startedAt: 0, timers: [], poll: null, renderTimer: null, anim: null, waitSince: 0, resumeToken: 0,
-      voiceOn: true, player: null, playerReady: false, speechId: null, speechFile: null, earlyFiles: [] },
+      voiceOn: true, player: null, playerReady: false, speechId: null, speechFile: null, earlyFiles: [], queue: null },
 
     build() {
       try {
@@ -394,7 +395,7 @@ Page(
       if (m.screen !== 'working') vibrate()
       this.show(m)
       if (m.screen === 'answer' || m.screen === 'confirm') this.report(`${m.screen}: speech ${m.speech || 'none'}, voice ${this.state.voiceOn ? 'on' : 'off'}`)
-      if (m.speech && this.state.voiceOn) this.speak(m.speech) // text first; the voice follows
+      if (m.speech && this.state.voiceOn) this.speak(m.speech, m.speechParts || 1) // text first; the voice follows
     },
 
     // A status line into the PC's relay log (via the phone), only with shared/debug.js DIAG on.
@@ -420,16 +421,16 @@ Page(
       this.show({ ...this.model, voiceNote: '' }) // redraw the button
     },
 
-    // Ask the phone to fetch the MP3 and send it here; it plays when the file arrives (app.js).
-    speak(speechId) {
+    // Ask the phone to fetch the MP3 clip(s) and send them here; each plays when its file arrives
+    // (app.js), in order: a long answer is the first sentence, then the rest (shared/speechqueue.js).
+    speak(speechId, parts = 1) {
       this.state.speechId = speechId
+      this.state.queue = speechQueue(parts)
       // The phone pushes the audio on its own, so it can arrive before this answer was shown.
-      const early = this.state.earlyFiles.find((f) => f.id === speechId)
-      if (early) {
-        this.state.earlyFiles = this.state.earlyFiles.filter((f) => f !== early)
-        this.playSpeech(early.path, { id: speechId })
-      }
-      this.phoneRequest({ method: 'speech', params: { id: speechId } }, { timeout: 120000 })
+      const early = this.state.earlyFiles.filter((f) => f.id === speechId)
+      this.state.earlyFiles = this.state.earlyFiles.filter((f) => f.id !== speechId)
+      for (const f of early) this.playSpeech(f.path, { id: speechId, part: f.part })
+      this.phoneRequest({ method: 'speech', params: { id: speechId, parts } }, { timeout: 120000 })
         .then((r) => {
           this.report(`speech ${speechId}: watch request -> ${r && r.ok ? 'ok' : (r && r.error) || 'no reply'}`)
           if (r && !r.ok && this.state.speechId === speechId) this.voiceProblem(r.error)
@@ -442,20 +443,25 @@ Page(
 
     playSpeech(path, params) {
       const pid = params && params.id
+      const part = Number(params && params.part) || 1
       const skip = !this.state.voiceOn ? 'voice off' : this.state.recording ? 'recording'
-        : pid !== this.state.speechId ? `waiting for ${this.state.speechId}` : ''
-      this.report(`speech ${pid}: file arrived ${path}${skip ? ` - not now (${skip})` : ''}`)
+        : pid !== this.state.speechId || !this.state.queue ? `waiting for ${this.state.speechId}` : ''
+      this.report(`speech ${pid}.${part}: file arrived ${path}${skip ? ` - not now (${skip})` : ''}`)
       if (skip) {
         if (this.state.voiceOn && !this.state.recording && pid) {
           // Not shown yet: keep it (newest few) for speak(); drop the oldest.
-          this.state.earlyFiles.push({ id: pid, path })
-          while (this.state.earlyFiles.length > 3) this.deleteFile(this.state.earlyFiles.shift().path)
+          this.state.earlyFiles.push({ id: pid, part, path })
+          while (this.state.earlyFiles.length > 4) this.deleteFile(this.state.earlyFiles.shift().path)
         } else {
           this.deleteFile(path)
         }
         return
       }
-      this.stopVoice()
+      const now = this.state.queue.add(part, path)
+      if (now) this.startPlayer(now) // else it waits for the clip before it to finish
+    },
+
+    startPlayer(path) {
       try {
         if (!this.state.player) this.state.player = create(id.PLAYER)
         const player = this.state.player
@@ -467,11 +473,14 @@ Page(
           })
           player.addEventListener(player.event.COMPLETE, () => {
             this.report('player complete')
-            this.stopVoice()
+            this.stopPlayer()
+            const next = this.state.queue ? this.state.queue.done() : null
+            if (next) this.startPlayer(next) // the rest of a long answer
           })
           this.state.playerReady = true
         }
-        this.removeSpeechFile() // the previous answer's audio
+        this.stopPlayer()
+        this.removeSpeechFile() // the previous clip's audio
         this.state.speechFile = path
         player.setSource(player.source.FILE, { file: path })
         player.prepare()
@@ -480,10 +489,16 @@ Page(
       }
     },
 
-    stopVoice() {
+    stopPlayer() {
       try {
         if (this.state.player) this.state.player.stop()
       } catch (e) {}
+    },
+
+    // Stop talking and drop clips still on their way (TALK, New chat, Voice off).
+    stopVoice() {
+      this.state.queue = null
+      this.stopPlayer()
     },
 
     removeSpeechFile() {

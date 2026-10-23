@@ -5,7 +5,8 @@ export function screenFor(reply) {
   if (!reply) return { screen: 'error', heard: '', text: 'No answer from the phone. Is the Zepp app running?' }
   if (!reply.ok) return { screen: 'error', heard: '', text: reply.error || 'Something went wrong.' }
   const heard = reply.heard ? `You said: ${reply.heard}` : ''
-  const speech = reply.speech ? { speech: reply.speech } : {} // Voice on: the relay's id for the spoken version
+  // Voice on: the relay's id for the spoken version (and its clip count when split in two)
+  const speech = reply.speech ? { speech: reply.speech, ...(reply.speechParts > 1 ? { speechParts: reply.speechParts } : {}) } : {}
   if (reply.kind === 'confirm') {
     return { screen: 'confirm', heard, text: reply.text, id: reply.id, ...(reply.approve ? { approve: true } : {}), ...speech }
   }

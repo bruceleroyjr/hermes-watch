@@ -6,7 +6,7 @@
  * - result {job}                -> POST /watch/result {job}
  * - last                        -> GET /watch/last (reply missed while the watch app was closed)
  * - newChat                     -> POST /watch/ask {text: 'start new session'} (New chat button)
- * - speech {id}                 -> GET /watch/speech?id= (MP3), sent on to the watch as a file
+ * - speech {id, parts}          -> GET /watch/speech?id=&part=N (MP3 per clip), sent on to the watch as files
  * - diag {events}               -> POST /watch/diag (only when shared/debug.js DIAG is on)
  * ask/confirm/result carry speak: true while Voice is on, so replies come with a speech id; the
  * phone starts fetching and sending that audio itself as the reply passes through (saves a
@@ -92,14 +92,14 @@ function diag(from, ...events) {
 
 // Downloaded MP3s are kept under a few rotating names, so they don't pile up in the Zepp app
 // (the side service can't delete files). If overwriting one ever fails, a one-off name is used.
-const SPEECH_SLOTS = 3
+const SPEECH_SLOTS = 4 // an answer can use two (first sentence + the rest)
 let speechSlot = 0
 
 // Spoken answer: download the MP3 from the relay, then send it to the watch (zml file transfer).
 // Resolves when the watch has it, so a failure can be shown on the watch.
-function sendSpeech(svc, id, trigger) {
+function sendSpeech(svc, id, trigger, part = 1, parts = 1) {
   const t0 = Date.now()
-  const step = (what) => diag('phone', `speech ${id}: ${what} (+${Date.now() - t0} ms)`)
+  const step = (what) => diag('phone', `speech ${id}.${part}: ${what} (+${Date.now() - t0} ms)`)
   step(`start (${trigger})`)
   return new Promise((resolve) => {
     let settled = false
@@ -119,7 +119,7 @@ function sendSpeech(svc, id, trigger) {
     }, 90000)
     const start = (file, fallback) => {
       try {
-        task = svc.download(`${RELAY}/watch/speech?id=${encodeURIComponent(id)}`,
+        task = svc.download(`${RELAY}/watch/speech?id=${encodeURIComponent(id)}&part=${part}`,
           { timeout: 40000, headers: { Authorization: `Bearer ${TOKEN}` }, filePath: file })
       } catch (e) {
         return fallback ? start(fallback) : done({ ok: false, error: `Voice download didn't start: ${errText(e)}` })
@@ -137,7 +137,7 @@ function sendSpeech(svc, id, trigger) {
         step(`downloaded, HTTP ${ev.statusCode}`)
         if (ev.statusCode !== 200) return done({ ok: false, error: `Voice: the PC answered ${ev.statusCode}.` })
         try {
-          const sent = svc.sendFile(ev.filePath || ev.tempFilePath || file, { type: 'speech', id })
+          const sent = svc.sendFile(ev.filePath || ev.tempFilePath || file, { type: 'speech', id, part, parts })
           step('handed to Bluetooth')
           sent.on('change', (e) => {
             const state = e && e.data && e.data.readyState
@@ -151,8 +151,19 @@ function sendSpeech(svc, id, trigger) {
       }
     }
     speechSlot = (speechSlot + 1) % SPEECH_SLOTS
-    start(`data://download/hermes-speech-${speechSlot}.mp3`, `data://download/hermes-${id}.mp3`)
+    start(`data://download/hermes-speech-${speechSlot}.mp3`, `data://download/hermes-${id}-${part}.mp3`)
   })
+}
+
+// All of an answer's clips, in order: clip 1 (the first sentence) goes first so it isn't stuck
+// behind the bigger clip 2 on Bluetooth. Reports the first failure, if any.
+async function sendSpeechClips(svc, id, parts, trigger) {
+  let first = null
+  for (let part = 1; part <= parts; part++) {
+    const r = await sendSpeech(svc, id, trigger, part, parts)
+    if (!r.ok && !first) first = r
+  }
+  return first || { ok: true, sent: true }
 }
 
 AppSideService(
@@ -169,7 +180,7 @@ AppSideService(
         work = call('POST', '/watch/confirm', { id: p.id, yes: !!p.yes, rid: p.rid || newRid(), speak: !!p.speak }, CONFIRM_MS)
       }
       else if (req.method === 'result') work = call('POST', '/watch/result', { job: p.job || '', speak: !!p.speak }, POLL_MS)
-      else if (req.method === 'speech') work = onceBy(speechJobs, String(p.id || ''), () => sendSpeech(this, String(p.id || ''), 'watch asked'))
+      else if (req.method === 'speech') work = onceBy(speechJobs, String(p.id || ''), () => sendSpeechClips(this, String(p.id || ''), Number(p.parts) || 1, 'watch asked'))
       else if (req.method === 'diag') {
         diag('watch', ...(Array.isArray(p.events) ? p.events : []))
         work = Promise.resolve({ ok: true })
@@ -179,7 +190,7 @@ AppSideService(
       else work = Promise.resolve({ ok: false, error: `unknown request ${req.method}` })
       work.then((r) => {
         res(null, r) // the text goes to the watch first...
-        if (r && r.speech) onceBy(speechJobs, r.speech, () => sendSpeech(this, r.speech, `reply to ${req.method || 'ask'}`)) // ...then its audio follows
+        if (r && r.speech) onceBy(speechJobs, r.speech, () => sendSpeechClips(this, r.speech, r.speechParts || 1, `reply to ${req.method || 'ask'}`)) // ...then its audio follows
       }).catch((e) => res(null, { ok: false, error: errText(e) }))
     },
   }),

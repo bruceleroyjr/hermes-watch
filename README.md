@@ -47,7 +47,10 @@ are kept until answered (or 30 min), so a lost poll reply just gets the same ans
 **Spoken answers.** With Voice on, replies carry a speech id and the relay starts the MP3 right away
 (`stt_worker.py` `POST /tts`: Microsoft's neural voices via [edge-tts](https://github.com/rany2/edge-tts),
 re-encoded to 16 kHz mono 16 kbps). The phone fetches it as soon as the reply passes through and sends it to
-the watch with zml file transfer; the watch plays it with the media Player (MP3 only). Note that edge-tts is a
+the watch with zml file transfer; the watch plays it with the media Player (MP3 only). Answers over ~120
+characters are spoken as two clips - the first sentence, then the rest - so the small first clip crosses
+Bluetooth in about a second and plays while the rest arrives (voice starts ~2-3 s after the text instead of
+~10 s for a long answer). Note that edge-tts is a
 cloud service: the answer text is sent to Microsoft to be spoken. With Voice off, nothing is synthesized.
 
 ## Requirements
@@ -97,7 +100,8 @@ All but `/health` need `Authorization: Bearer <token>`.
 - `POST /watch/confirm` `{id, yes}` -> the next reply (Yes/No cards last 60 s, Approve cards ~5 min)
 - `GET /watch/result?job=` -> `{kind: working}` until a slow answer (or the next Approve card) is ready
 - `GET /watch/last` -> the latest reply plus `ago_ms`, for a watch that closed mid-question
-- `GET /watch/speech?id=` -> the spoken answer as `audio/mpeg` (ask/confirm/result with `speak: true` add `speech`)
+- `GET /watch/speech?id=&part=N` -> a spoken clip as `audio/mpeg` (ask/confirm/result with `speak: true` add
+  `speech`, plus `speechParts: 2` when a long answer is split; `part` defaults to 1)
 - `POST /watch/diag` `{from, events}` -> one-line status reports into `relay.log`; the watch and phone only
   send them when `zepp-app/shared/debug.js` sets `DIAG = true` (handy because the phone's logs can't be read
   from the PC)

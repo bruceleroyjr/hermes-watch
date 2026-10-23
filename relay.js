@@ -315,7 +315,9 @@ function createServer(opts) {
   // Spoken answers (Voice on the watch): a reply the watch asked to hear gets a speech id and its MP3
   // is started at once, in parallel with the text going out; the phone fetches it from
   // GET /watch/speech?id=. Speech never delays an answer, and nothing is made while Voice is off.
-  const speeches = new Map(); // id -> {text, at, audio: Promise<Buffer>|null}
+  // A long answer is spoken as two clips (splitSpeech): the short first sentence reaches the
+  // watch over Bluetooth fast and plays while the rest is still on its way.
+  const speeches = new Map(); // id -> {parts: [text], audio: [Promise<Buffer>|null], at}
 
   function withSpeech(reply, speak) {
     if (!speak || !reply || !reply.ok || reply.approve || !['answer', 'confirm'].includes(reply.kind)) return reply;
@@ -323,25 +325,31 @@ function createServer(opts) {
     if (!text) return reply;
     for (const [k, v] of speeches) if (Date.now() - v.at > JOB_KEEP_MS) speeches.delete(k);
     const id = crypto.randomBytes(6).toString('hex');
-    // Started now, so it's (nearly) ready by the time the phone asks for it.
-    const audio = tts(text);
-    audio.catch(() => {}); // a failure is reported when the phone fetches it
-    speeches.set(id, { text, at: Date.now(), audio });
-    return { ...reply, speech: id };
+    const parts = splitSpeech(text);
+    // Started now, so they're (nearly) ready by the time the phone asks for them.
+    const audio = parts.map((p) => {
+      const a = tts(p);
+      a.catch(() => {}); // a failure is reported when the phone fetches it
+      return a;
+    });
+    speeches.set(id, { parts, audio, at: Date.now() });
+    return { ...reply, speech: id, ...(parts.length > 1 ? { speechParts: parts.length } : {}) };
   }
 
-  function speechAudio(id, res, send) {
+  // GET /watch/speech?id=&part=N (part 1 when left out).
+  function speechAudio(id, part, res, send) {
     const entry = speeches.get(id);
-    if (!entry) return send(404, { ok: false, error: 'no such speech' });
+    const i = (Number(part) || 1) - 1;
+    if (!entry || i < 0 || i >= entry.parts.length) return send(404, { ok: false, error: 'no such speech' });
     const started = Date.now();
-    if (!entry.audio) entry.audio = tts(entry.text);
-    entry.audio.then((mp3) => {
-      log(`  speech ${id}: ${entry.text.length} chars -> ${mp3.length} B in ${Date.now() - started}ms`);
+    if (!entry.audio[i]) entry.audio[i] = tts(entry.parts[i]);
+    entry.audio[i].then((mp3) => {
+      log(`  speech ${id}.${i + 1}: ${entry.parts[i].length} chars -> ${mp3.length} B in ${Date.now() - started}ms`);
       res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': mp3.length });
       res.end(mp3);
     }, (e) => {
-      entry.audio = null; // a later fetch tries again
-      log(`  speech ${id} failed: ${e.message}`);
+      entry.audio[i] = null; // a later fetch tries again
+      log(`  speech ${id}.${i + 1} failed: ${e.message}`);
       send(502, { ok: false, error: `voice failed: ${e.message}` });
     });
   }
@@ -393,7 +401,9 @@ function createServer(opts) {
     if (req.method === 'GET' && url.pathname === '/watch/result') {
       return send(200, result(url.searchParams.get('job') || '', url.searchParams.get('speak') === '1'));
     }
-    if (req.method === 'GET' && url.pathname === '/watch/speech') return speechAudio(url.searchParams.get('id') || '', res, send);
+    if (req.method === 'GET' && url.pathname === '/watch/speech') {
+      return speechAudio(url.searchParams.get('id') || '', url.searchParams.get('part'), res, send);
+    }
     if (req.method === 'GET' && url.pathname === '/watch/last') {
       return send(200, last ? { ...last.reply, ago_ms: Date.now() - last.at } : { ok: true, kind: 'none' });
     }
@@ -453,6 +463,24 @@ function speechText(text) {
   return end > 0 ? cut.slice(0, end + 1) : cut;
 }
 
+// Spoken text -> clips. Up to SPLIT_MIN chars it's one clip; longer, the first sentence (at most
+// FIRST_CHARS, else cut at a word) is clip 1 and the rest clip 2. Clip 1 is small (a few KB), so
+// the voice starts ~1-2 s after the text even when the whole answer is ~40 KB of audio.
+const SPLIT_MIN = 120;
+const FIRST_CHARS = 160;
+function splitSpeech(text) {
+  if (text.length <= SPLIT_MIN) return [text];
+  const end = text.search(/[.!?](\s|$)/);
+  let first = end >= 0 && end < FIRST_CHARS ? text.slice(0, end + 1) : '';
+  if (!first) {
+    const cut = text.slice(0, FIRST_CHARS);
+    const space = cut.lastIndexOf(' ');
+    first = space > 40 ? cut.slice(0, space) : cut;
+  }
+  const rest = text.slice(first.length).trim();
+  return rest ? [first.trim(), rest] : [text];
+}
+
 // POST {text} to the speech worker's /tts -> MP3 Buffer.
 function postTts(url, text) {
   return new Promise((resolve, reject) => {
@@ -473,7 +501,7 @@ function postTts(url, text) {
   });
 }
 
-module.exports = { createServer, newSessionId, speechText, DEFAULT_DEADLINE_MS };
+module.exports = { createServer, newSessionId, speechText, splitSpeech, DEFAULT_DEADLINE_MS };
 
 if (require.main === module) {
   const LOG_FILE = path.join(__dirname, 'relay.log');

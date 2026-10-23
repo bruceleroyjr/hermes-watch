@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createServer, speechText } = require('../relay');
+const { createServer, speechText, splitSpeech } = require('../relay');
 const { fakeHermes, fakeStt, listen } = require('./fake-hermes');
 
 const TOKEN = 'test-watch-token';
@@ -97,6 +97,36 @@ test('a lost Approve card comes back on the next poll until it is answered', asy
   await sleep(2500);
   assert.strictEqual((await call('POST', '/watch/result', { job: done.job })).json.text, 'Built: build slow thing');
   assert.ok(r.job);
+});
+
+test('splitSpeech: short answers are one clip; long ones are the first sentence, then the rest', () => {
+  assert.deepStrictEqual(splitSpeech('It is 42.'), ['It is 42.']);
+  const long = 'NASA confirmed the Artemis crew today. The mission will orbit the Moon for ten days. '
+    + 'Engineers are still testing the heat shield. More details come out on Friday.';
+  assert.deepStrictEqual(splitSpeech(long), ['NASA confirmed the Artemis crew today.',
+    'The mission will orbit the Moon for ten days. Engineers are still testing the heat shield. More details come out on Friday.']);
+  const [first, rest] = splitSpeech('word '.repeat(100).trim()); // no sentence end: cut at a word
+  assert.ok(first.length <= 160 && first.endsWith('word') && rest.startsWith('word'), first);
+});
+
+test('voice on, long answer: two clips, both started at once, served as part 1 and part 2', async (t) => {
+  const { ask, speech, spoken } = await setup(t);
+  const r = await ask({ text: 'long one', speak: true });
+  assert.strictEqual(r.speechParts, 2);
+  assert.strictEqual(spoken.length, 2); // both clips are being made while the text goes out
+  const one = await speech(`${r.speech}&part=1`);
+  const two = await speech(`${r.speech}&part=2`);
+  assert.strictEqual(one.status, 200);
+  assert.ok(one.body.length < two.body.length, 'the first clip is the short one');
+  assert.strictEqual((await speech(`${r.speech}&part=3`)).status, 404);
+});
+
+test('voice on, short answer: one clip (no speechParts), plain /watch/speech?id= still works', async (t) => {
+  const { ask, speech } = await setup(t);
+  const r = await ask({ text: 'what time is it', speak: true });
+  assert.strictEqual(r.speechParts, undefined);
+  assert.strictEqual((await speech(r.speech)).body, 'MP3:echo: what time is it.');
+  assert.strictEqual((await speech(`${r.speech}&part=1`)).body, 'MP3:echo: what time is it.');
 });
 
 test('voice off: no speech id, nothing spoken', async (t) => {
