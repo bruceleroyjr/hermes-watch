@@ -29,6 +29,21 @@ test('build and code requests get the Claude Code rule next to the question', ()
   }
 });
 
+test('questions that only mention his setup, jobs or code are not build requests', () => {
+  for (const said of ['Please build a script that checks my Tesla charge', 'could you set up a job for tide times',
+    'I want you to fix the watch relay', 'ask Claude to make the morning email shorter',
+    'write a skill that saves YouTube links', 'there is a bug in the watch app']) {
+    assert.match(withWatchRules(said), /claude_code_build/, said);
+  }
+  for (const said of [
+    "For my current PC setup, I want to optimize my Hermes agent to respond faster. I'm currently using a free cloud NVIDIA model and I was curious if there was a local deep-seek model that's free that I can download for my computer.",
+    'What are some, I guess, flat rate paid models at $10 subscription that could work with my PC setup and hardware?',
+    'Is my email job running?', 'add milk to my shopping list', "What's the code for the gate?",
+    'set up a reminder for 5 PM']) {
+    assert.doesNotMatch(withWatchRules(said), /claude_code_build/, said);
+  }
+});
+
 test('other questions do not get the email rule', () => {
   assert.doesNotMatch(withWatchRules('How much is Bitcoin?'), /gmail_mark_read/);
   assert.doesNotMatch(withWatchRules('anything urgent in my email'), /gmail_mark_read FIRST/);

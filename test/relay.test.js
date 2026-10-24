@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createServer, speechText, splitSpeech } = require('../relay');
+const { createServer, speechText, splitSpeech, approvalSpeech } = require('../relay');
 const { fakeHermes, fakeStt, listen } = require('./fake-hermes');
 
 const TOKEN = 'test-watch-token';
@@ -109,16 +109,28 @@ test('splitSpeech: short answers are one clip; long ones are the first sentence,
   assert.ok(first.length <= 160 && first.endsWith('word') && rest.startsWith('word'), first);
 });
 
-test('voice on, long answer: two clips, both started at once, served as part 1 and part 2', async (t) => {
+test('splitSpeech: a full-screen answer is three clips at most, split at sentences, nothing lost', () => {
+  const sentences = Array.from({ length: 16 }, (_, i) => `Sentence number ${i + 1} says a few more words here.`);
+  const text = sentences.join(' '); // ~830 chars, like a long watch answer
+  const parts = splitSpeech(text);
+  assert.strictEqual(parts.length, 3);
+  assert.strictEqual(parts.join(' '), text);
+  assert.strictEqual(parts[0], sentences[0]);
+  for (const p of parts.slice(1)) assert.ok(p.endsWith('.') && p.length < 500, p);
+  const words = splitSpeech(speechText('word '.repeat(300))); // no sentence ends at all
+  assert.ok(words.length <= 3 && words.every(Boolean), words);
+});
+
+test('voice on, full-screen answer: three clips, all started at once, served as parts 1-3', async (t) => {
   const { ask, speech, spoken } = await setup(t);
   const r = await ask({ text: 'long one', speak: true });
-  assert.strictEqual(r.speechParts, 2);
-  assert.strictEqual(spoken.length, 2); // both clips are being made while the text goes out
-  const one = await speech(`${r.speech}&part=1`);
-  const two = await speech(`${r.speech}&part=2`);
-  assert.strictEqual(one.status, 200);
-  assert.ok(one.body.length < two.body.length, 'the first clip is the short one');
-  assert.strictEqual((await speech(`${r.speech}&part=3`)).status, 404);
+  assert.strictEqual(r.speechParts, 3);
+  assert.strictEqual(spoken.length, 3); // every clip is being made while the text goes out
+  const clips = [];
+  for (const n of [1, 2, 3]) clips.push(await speech(`${r.speech}&part=${n}`));
+  assert.ok(clips.every(c => c.status === 200));
+  assert.ok(clips[0].body.length < clips[1].body.length, 'the first clip is the short one');
+  assert.strictEqual((await speech(`${r.speech}&part=4`)).status, 404);
 });
 
 test('voice on, short answer: one clip (no speechParts), plain /watch/speech?id= still works', async (t) => {
@@ -134,14 +146,16 @@ test('voice off: no speech id, nothing spoken', async (t) => {
   assert.strictEqual((await ask({ text: 'what time is it' })).speech, undefined);
 });
 
-test('voice: Yes/No cards and their results are spoken; Approve cards are not', async (t) => {
-  const { ask, confirm } = await setup(t);
+test('voice: Yes/No cards, their results and Approve cards are spoken (Approve: what + the question)', async (t) => {
+  const { ask, confirm, speech } = await setup(t);
   const card = await ask({ text: 'text Alex saying hi', speak: true });
   assert.ok(card.speech);
   assert.ok((await confirm({ id: card.id, yes: true, speak: true })).speech);
   const approve = await ask({ text: 'build a tide job', speak: true });
   assert.strictEqual(approve.approve, true);
-  assert.strictEqual(approve.speech, undefined);
+  assert.ok(approve.speech);
+  assert.strictEqual((await speech(approve.speech)).body,
+    'MP3:Claude Code wants to change files in my-project: step 1: build a tide job. Approve this change?');
   await confirm({ id: approve.id, yes: false }); // let the fake Hermes finish
 });
 
@@ -161,12 +175,22 @@ test('voice: unknown id -> 404, voice service down -> 502, needs the token', asy
   assert.strictEqual((await speech(r.speech, 'wrong')).status, 401);
 });
 
-test('speechText: bullets and links become plain sentences; long answers stop at a sentence', () => {
+test('approvalSpeech: a build card is read as its title and the question, not the whole plan', () => {
+  const plan = 'Alex wants to optimize the Hermes agent. '.repeat(40);
+  const said = approvalSpeech(`Claude Code wants to BUILD this:\n\nLocal DeepSeek model for Hermes\n\n${plan}\n\nApprove building it?`);
+  assert.strictEqual(said, 'Claude Code wants to build this: Local DeepSeek model for Hermes. Approve building it?');
+  const job = approvalSpeech(`Change 'Morning brief' (8:00 AM, topic 5): ${'make it shorter. '.repeat(30)}\n\nFiles: a.py, job prompt.\n\nApprove?`);
+  assert.ok(job.startsWith("Change 'Morning brief'") && job.endsWith('Approve?') && job.length < 400, job);
+  assert.strictEqual(approvalSpeech('Approve this?'), 'Approve this?');
+});
+
+test('speechText: bullets and links become plain sentences; the whole screen answer is read', () => {
   assert.strictEqual(speechText('Today:\n• Dentist 3 PM\n• Gym at 6. See https://x.example/a'), 'Today: Dentist 3 PM. Gym at 6. See.');
-  const long = 'First sentence is here. '.repeat(30).trim();
-  const said = speechText(long);
-  assert.ok(said.length <= 400 && said.endsWith('here.'), said);
-  assert.strictEqual(speechText('x'.repeat(500)).length, 400);
+  const screenful = 'First sentence is here. '.repeat(45).trim(); // ~1080 chars: the 1000-char answer + its question
+  assert.strictEqual(speechText(screenful), screenful);
+  const said = speechText('First sentence is here. '.repeat(80).trim()); // only a runaway text is cut, at a sentence
+  assert.ok(said.length <= 1200 && said.endsWith('here.'), said);
+  assert.strictEqual(speechText('x'.repeat(1500)).length, 1200);
 });
 
 test('Hermes turns are streamed (so approvals can reach the watch)', async (t) => {

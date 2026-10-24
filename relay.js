@@ -188,7 +188,9 @@ function createServer(opts) {
     const turn = askHermes(sessionId, userText, (ev) => {
       const id = crypto.randomBytes(6).toString('hex');
       approvals.set(id, { runId: ev.run_id, requestId: ev.request_id, job, entry });
-      const asked = String(ev.command || ev.description || 'Approve this?').replace(/\n\s*\n/g, '\n');
+      const raw = String(ev.command || ev.description || 'Approve this?');
+      const asked = raw.replace(/\n\s*\n/g, '\n');
+      approvals.get(id).spoken = approvalSpeech(raw);
       entry.card = { ok: true, heard, kind: 'confirm', approve: true, text: truncateForHud(formatForHud(asked), WATCH_CHAR_BUDGET), id };
       log(`  approval asked (${ev.pattern_key || 'approval'}) card=${id} job=${job}`);
       if (entry.wake) entry.wake();
@@ -315,13 +317,15 @@ function createServer(opts) {
   // Spoken answers (Voice on the watch): a reply the watch asked to hear gets a speech id and its MP3
   // is started at once, in parallel with the text going out; the phone fetches it from
   // GET /watch/speech?id=. Speech never delays an answer, and nothing is made while Voice is off.
-  // A long answer is spoken as two clips (splitSpeech): the short first sentence reaches the
-  // watch over Bluetooth fast and plays while the rest is still on its way.
+  // A long answer is spoken as two or three clips (splitSpeech): the short first sentence reaches
+  // the watch over Bluetooth fast and plays while the rest is still on its way.
   const speeches = new Map(); // id -> {parts: [text], audio: [Promise<Buffer>|null], at}
 
   function withSpeech(reply, speak) {
-    if (!speak || !reply || !reply.ok || reply.approve || !['answer', 'confirm'].includes(reply.kind)) return reply;
-    const text = speechText(reply.text || '');
+    if (!speak || !reply || !reply.ok || !['answer', 'confirm'].includes(reply.kind)) return reply;
+    // An Approve card says what Claude Code wants and asks; the screen keeps the full plan.
+    const card = reply.approve ? approvals.get(reply.id) : null;
+    const text = speechText(card && card.spoken ? card.spoken : reply.text || '');
     if (!text) return reply;
     for (const [k, v] of speeches) if (Date.now() - v.at > JOB_KEEP_MS) speeches.delete(k);
     const id = crypto.randomBytes(6).toString('hex');
@@ -443,9 +447,9 @@ function createServer(opts) {
   });
 }
 
-// What the watch reads out: bullets and lines become sentences, links go, and a long answer stops
-// at the last whole sentence within SPEECH_CHARS (the screen still has all of it).
-const SPEECH_CHARS = 400;
+// What the watch reads out: bullets and lines become sentences, links go. The whole answer is read
+// (the screen's 1000 chars + its question); only a runaway text stops at a sentence within SPEECH_CHARS.
+const SPEECH_CHARS = 1200;
 function speechText(text) {
   const plain = String(text)
     .replace(/https?:\/\/\S+/g, '')
@@ -463,11 +467,31 @@ function speechText(text) {
   return end > 0 ? cut.slice(0, end + 1) : cut;
 }
 
+// What an Approve card says out loud: its first line ("Claude Code wants to BUILD this:"), the
+// first sentence of what follows (the title or task) and the closing question - not a long plan.
+const APPROVAL_PART_CHARS = 200;
+function approvalSpeech(asked) {
+  const lines = String(asked).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const clip = (s) => {
+    if (s.length <= APPROVAL_PART_CHARS) return s;
+    const cut = s.slice(0, APPROVAL_PART_CHARS);
+    const end = cut.search(/[.!?](\s|$)/);
+    return end > 40 ? cut.slice(0, end + 1) : `${cut.slice(0, cut.lastIndexOf(' '))}.`;
+  };
+  const sentence = (s) => (/[.!?:]$/.test(s) ? s : `${s}.`);
+  const last = lines.length > 1 && /\?$/.test(lines[lines.length - 1]) ? lines.pop() : '';
+  const said = lines.slice(0, 2).map(clip).map(sentence);
+  return [...said, last].filter(Boolean).join(' ').replace(/\bBUILD\b/g, 'build');
+}
+
 // Spoken text -> clips. Up to SPLIT_MIN chars it's one clip; longer, the first sentence (at most
 // FIRST_CHARS, else cut at a word) is clip 1 and the rest clip 2. Clip 1 is small (a few KB), so
-// the voice starts ~1-2 s after the text even when the whole answer is ~40 KB of audio.
+// the voice starts ~1-2 s after the text even when the whole answer is ~200 KB of audio. A rest
+// over REST_CHARS is halved at the sentence nearest its middle (clip 3 transfers while 2 plays).
+// Never more than 3 clips: the phone keeps voice files under 4 rotating names (zepp-app SPEECH_SLOTS).
 const SPLIT_MIN = 120;
 const FIRST_CHARS = 160;
+const REST_CHARS = 450;
 function splitSpeech(text) {
   if (text.length <= SPLIT_MIN) return [text];
   const end = text.search(/[.!?](\s|$)/);
@@ -478,7 +502,22 @@ function splitSpeech(text) {
     first = space > 40 ? cut.slice(0, space) : cut;
   }
   const rest = text.slice(first.length).trim();
-  return rest ? [first.trim(), rest] : [text];
+  if (!rest) return [text];
+  if (rest.length <= REST_CHARS) return [first.trim(), rest];
+  const mid = halfway(rest);
+  return [first.trim(), rest.slice(0, mid).trim(), rest.slice(mid).trim()];
+}
+
+// Where to halve a long rest: the sentence end nearest the middle, else the space nearest it.
+function halfway(text) {
+  const middle = text.length / 2;
+  let best = -1;
+  for (const m of text.matchAll(/[.!?](?=\s)/g)) {
+    if (best < 0 || Math.abs(m.index + 1 - middle) < Math.abs(best - middle)) best = m.index + 1;
+  }
+  if (best > 0 && Math.abs(best - middle) < middle * 0.6) return best;
+  const space = text.lastIndexOf(' ', middle);
+  return space > 0 ? space : Math.floor(middle);
 }
 
 // POST {text} to the speech worker's /tts -> MP3 Buffer.
@@ -501,7 +540,7 @@ function postTts(url, text) {
   });
 }
 
-module.exports = { createServer, newSessionId, speechText, splitSpeech, DEFAULT_DEADLINE_MS };
+module.exports = { createServer, newSessionId, speechText, splitSpeech, approvalSpeech, DEFAULT_DEADLINE_MS };
 
 if (require.main === module) {
   const LOG_FILE = path.join(__dirname, 'relay.log');

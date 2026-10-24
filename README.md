@@ -48,10 +48,14 @@ are kept until answered (or 30 min), so a lost poll reply just gets the same ans
 **Spoken answers.** With Voice on, replies carry a speech id and the relay starts the MP3 right away
 (`stt_worker.py` `POST /tts`: Microsoft's neural voices via [edge-tts](https://github.com/rany2/edge-tts),
 re-encoded to 16 kHz mono 16 kbps). The phone fetches it as soon as the reply passes through and sends it to
-the watch with zml file transfer; the watch plays it with the media Player (MP3 only). Answers over ~120
-characters are spoken as two clips - the first sentence, then the rest - so the small first clip crosses
-Bluetooth in about a second and plays while the rest arrives (voice starts ~2-3 s after the text instead of
-~10 s for a long answer). Note that edge-tts is a
+the watch with zml file transfer; the watch plays it with the media Player (MP3 only). The whole answer is
+read (up to 1200 characters: the screen's 1000 plus its question). Answers over ~120 characters are spoken
+as two or three clips - the first sentence, then the rest (halved at a sentence when it's over ~450
+characters) - so the small first clip crosses Bluetooth in about a second and plays while the rest arrives
+(voice starts ~2-3 s after the text instead of ~10 s for a long answer). Three clips at most: the phone
+keeps voice files under 4 rotating names. Approve cards are spoken too, as what Claude Code wants, its
+title or task and the question (not the whole plan). The watch releases its audio player when the page
+closes; the watch has only one, and a page that kept it left the next one silent. Note that edge-tts is a
 cloud service: the answer text is sent to Microsoft to be spoken. With Voice off, nothing is synthesized.
 
 **Long questions.** A recording can run up to 90 s (it stops by itself; tap STOP sooner). zml sends a

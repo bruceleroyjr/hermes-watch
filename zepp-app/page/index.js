@@ -117,6 +117,8 @@ Page(
       voiceOn: true, player: null, playerReady: false, speechId: null, speechFile: null, earlyFiles: [], queue: null },
 
     build() {
+      this.state.player = null // each page gets its own player; onDestroy releases it
+      this.state.playerReady = false
       try {
         this.state.voiceOn = localStorage.getItem(VOICE_KEY, 'on') !== 'off'
       } catch (e) {}
@@ -164,6 +166,7 @@ Page(
 
     onDestroy() {
       this.stopVoice()
+      this.releasePlayer()
       try {
         getApp()._options.globalData.onSpeechFile = null
         getApp()._options.globalData.onSpeechNote = null
@@ -491,6 +494,7 @@ Page(
       try {
         if (!this.state.player) this.state.player = create(id.PLAYER)
         const player = this.state.player
+        if (!player) throw new Error("the watch's speaker is busy - close Hermes and open it again")
         if (!this.state.playerReady) {
           player.addEventListener(player.event.PREPARE, (ok) => {
             this.report(`player prepare ${ok ? 'ok' : 'FAILED'} ${this.state.speechFile}`)
@@ -518,6 +522,17 @@ Page(
     stopPlayer() {
       try {
         if (this.state.player) this.state.player.stop()
+      } catch (e) {}
+    },
+
+    // The watch has one audio player: a page that closes without releasing it leaves the next
+    // page's create(id.PLAYER) with nothing ("cannot read property 'addEventListener' of undefined").
+    releasePlayer() {
+      const player = this.state.player
+      this.state.player = null
+      this.state.playerReady = false
+      try {
+        if (player) player.release()
       } catch (e) {}
     },
 
