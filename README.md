@@ -54,8 +54,10 @@ as two or three clips - the first sentence, then the rest (halved at a sentence 
 characters) - so the small first clip crosses Bluetooth in about a second and plays while the rest arrives
 (voice starts ~2-3 s after the text instead of ~10 s for a long answer). Three clips at most: the phone
 keeps voice files under 4 rotating names. Approve cards are spoken too, as what Claude Code wants, its
-title or task and the question (not the whole plan). The watch releases its audio player when the page
-closes; the watch has only one, and a page that kept it left the next one silent. Note that edge-tts is a
+title or task and the question (not the whole plan). The page keeps one audio player and
+stops + releases it as soon as each clip finishes, then reuses it for the next clip: on the Active 2, an app
+that exits while still holding the player reboots the watch, and a second create() after a release returns
+nothing. Note that edge-tts is a
 cloud service: the answer text is sent to Microsoft to be spoken. With Voice off, nothing is synthesized.
 
 **Long questions.** A recording can run up to 90 s (it stops by itself; tap STOP sooner). zml sends a

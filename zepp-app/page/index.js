@@ -22,9 +22,10 @@ import { screenFor, pollStep, resumeFor, lastIsNew } from '../shared/screens'
 import { ringDots, dotColors, elapsedText, dotsText } from '../shared/spinner'
 import { DIAG } from '../shared/debug'
 import { speechQueue } from '../shared/speechqueue'
-import { splitAudio } from '../shared/pieces'
+import { pieceRanges } from '../shared/pieces'
 
 const FILE = 'clip.opus'
+const TRACE = 'close-trace'
 const MAX_REC_MS = 90000 // long questions are fine; the upload gets extra time (uploadAllowanceMs)
 const POLL_MS = 3000
 // A poll with no reply or error after this is abandoned and sent again: one once never ended (no
@@ -92,14 +93,22 @@ function withMic(onGranted, onDenied) {
   else if (result === 1) onDenied('The microphone is blocked. Allow it for Hermes in the watch settings.')
 }
 
-function readClip() {
+function clipSize() {
   const st = statSync({ path: FILE })
-  if (!st || !st.size) return null
+  return (st && st.size) || 0
+}
+
+// One piece of the recording, read when it is sent: only ~24 KB of the clip is in memory at a time.
+function readPiece({ start, length }) {
   const fd = openSync({ path: FILE, flag: O_RDONLY })
-  const buf = new ArrayBuffer(st.size)
-  readSync({ fd, buffer: buf })
-  closeSync(fd)
-  return buf
+  try {
+    const buf = new ArrayBuffer(length)
+    const got = readSync({ fd, buffer: buf, options: { position: start } })
+    if (got !== length) throw new Error(`read ${got} of ${length} bytes`)
+    return buf
+  } finally {
+    closeSync(fd)
+  }
 }
 
 function textHeight(text, size) {
@@ -114,11 +123,12 @@ function textHeight(text, size) {
 Page(
   BasePage({
     state: { widgets: [], recorder: null, recording: false, busy: false, startedAt: 0, timers: [], poll: null, renderTimer: null, anim: null, waitSince: 0, resumeToken: 0,
-      voiceOn: true, player: null, playerReady: false, speechId: null, speechFile: null, earlyFiles: [], queue: null },
+      voiceOn: true, player: null, playerReady: false, playing: false, speechId: null, speechFile: null, earlyFiles: [], queue: null },
 
     build() {
-      this.state.player = null // each page gets its own player; onDestroy releases it
+      this.state.player = null // each page gets its own player
       this.state.playerReady = false
+      this.state.playing = false
       try {
         this.state.voiceOn = localStorage.getItem(VOICE_KEY, 'on') !== 'off'
       } catch (e) {}
@@ -126,6 +136,12 @@ Page(
         getApp()._options.globalData.onSpeechFile = (path, params) => this.playSpeech(path, params)
         getApp()._options.globalData.onSpeechNote = (note) => this.report(note)
       } catch (e) {}
+      if (DIAG) {
+        try {
+          const last = localStorage.getItem(TRACE, 'none')
+          this.state.timers.push(setTimeout(() => this.report(`last close: ${last}`), 2000)) // once the phone link is up
+        } catch (e) {}
+      }
       let saved = null
       try {
         saved = JSON.parse(localStorage.getItem(SAVED, '') || 'null')
@@ -165,8 +181,9 @@ Page(
     },
 
     onDestroy() {
-      this.stopVoice()
-      this.releasePlayer()
+      this.trace('closing')
+      this.stopVoice() // normally already released when the last clip finished
+      this.trace('player closed')
       try {
         getApp()._options.globalData.onSpeechFile = null
         getApp()._options.globalData.onSpeechNote = null
@@ -178,6 +195,16 @@ Page(
       } catch (e) {}
       resetPageBrightTime()
       resetDropWristScreenOff()
+      this.trace('closed')
+    },
+
+    // Reboot hunt (DIAG only): the last step of the previous close survives a reboot in
+    // localStorage, and the next open reports it to the PC log.
+    trace(step) {
+      if (!DIAG) return
+      try {
+        localStorage.setItem(TRACE, `${new Date().toISOString()} ${step}`)
+      } catch (e) {}
     },
 
     // ------------------------------------------------------------------ screens
@@ -379,24 +406,25 @@ Page(
     },
 
     send() {
-      let audio
+      let size
       try {
-        audio = readClip()
+        size = clipSize()
       } catch (e) {
         return this.finish({ ok: false, error: `Could not read the recording: ${errText(e)}` })
       }
-      if (!audio) return this.finish({ ok: false, error: 'Nothing was recorded. Try again.' })
+      if (!size) return this.finish({ ok: false, error: 'Nothing was recorded. Try again.' })
       // Long recordings go in pieces (shared/pieces.js); the last piece is the question itself.
+      // Each piece is read from the file just before it is sent, and only while it is sent.
       const rid = newRid()
-      const pieces = splitAudio(audio)
-      const n = pieces.length
+      const ranges = pieceRanges(size)
+      const n = ranges.length
       const opts = { contentType: 'bin', dataType: 'json' }
       const envelope = (i) => buildEnvelope(n > 1 ? { kind: 'ask', speak: this.state.voiceOn, rid, part: i + 1, parts: n }
-        : { kind: 'ask', speak: this.state.voiceOn, rid }, pieces[i])
+        : { kind: 'ask', speak: this.state.voiceOn, rid }, readPiece(ranges[i]))
       const piece = (i, tries = 1) => {
         this.show({ screen: 'thinking', heard: `Sending ${i + 1} of ${n}` })
-        const extra = uploadAllowanceMs(pieces[i].byteLength)
-        return this.phoneRequest(envelope(i), { ...opts, timeout: ASK_ATTEMPT_MS + extra })
+        const extra = uploadAllowanceMs(ranges[i].length)
+        return Promise.resolve().then(() => this.phoneRequest(envelope(i), { ...opts, timeout: ASK_ATTEMPT_MS + extra }))
           .then((r) => (r && r.ok ? r : Promise.reject(new Error((r && r.error) || 'no reply'))))
           .catch((e) => {
             if (tries >= PIECE_TRIES || /shake timeout/i.test(errText(e))) throw e // phoneRequest already waited 30 s
@@ -405,7 +433,7 @@ Page(
       }
       const ask = () => {
         if (n > 1) this.show({ screen: 'thinking', heard: `Sending ${n} of ${n}` })
-        const extra = uploadAllowanceMs(pieces[n - 1].byteLength)
+        const extra = uploadAllowanceMs(ranges[n - 1].length)
         return this.resendRequest(envelope(n - 1), opts, ASK_ATTEMPT_MS + extra, REQUEST_BUDGET_MS + 2 * extra)
       }
       let chain = Promise.resolve()
@@ -490,56 +518,61 @@ Page(
       if (now) this.startPlayer(now) // else it waits for the clip before it to finish
     },
 
+    // One player for the page, released (stop + release) the moment each clip finishes and reused
+    // for the next one, like Zepp's Easy Media. A player still held when the app exits rebooted the
+    // watch every time (2026-10-23: any clip, any format, even with no Bluetooth); released while
+    // the app was open, it didn't. A second create() after a release returns nothing.
     startPlayer(path) {
       try {
+        this.endPlayer()
+        this.removeSpeechFile() // the previous clip's audio
         if (!this.state.player) this.state.player = create(id.PLAYER)
         const player = this.state.player
         if (!player) throw new Error("the watch's speaker is busy - close Hermes and open it again")
         if (!this.state.playerReady) {
           player.addEventListener(player.event.PREPARE, (ok) => {
+            this.trace(`player prepare ${ok}`)
             this.report(`player prepare ${ok ? 'ok' : 'FAILED'} ${this.state.speechFile}`)
-            if (ok) player.start()
-            else this.voiceProblem(`Voice: the watch couldn't play it (${this.state.speechFile}).`)
+            if (ok) return player.start()
+            this.endPlayer()
+            this.voiceProblem(`Voice: the watch couldn't play it (${this.state.speechFile}).`)
           })
           player.addEventListener(player.event.COMPLETE, () => {
-            this.report('player complete')
-            this.stopPlayer()
+            this.endPlayer()
+            this.trace('player complete, released')
+            this.report('player complete, released')
             const next = this.state.queue ? this.state.queue.done() : null
             if (next) this.startPlayer(next) // the rest of a long answer
           })
           this.state.playerReady = true
         }
-        this.stopPlayer()
-        this.removeSpeechFile() // the previous clip's audio
         this.state.speechFile = path
+        this.state.playing = true
         player.setSource(player.source.FILE, { file: path })
         player.prepare()
       } catch (e) {
+        this.endPlayer()
         this.voiceProblem(`Voice: ${errText(e)} (${path})`)
       }
     },
 
-    stopPlayer() {
-      try {
-        if (this.state.player) this.state.player.stop()
-      } catch (e) {}
-    },
-
-    // The watch has one audio player: a page that closes without releasing it leaves the next
-    // page's create(id.PLAYER) with nothing ("cannot read property 'addEventListener' of undefined").
-    releasePlayer() {
+    // Stop and release the speaker; the player object stays for the next clip.
+    endPlayer() {
       const player = this.state.player
-      this.state.player = null
-      this.state.playerReady = false
+      if (!player || !this.state.playing) return
+      this.state.playing = false
       try {
-        if (player) player.release()
+        player.stop()
+      } catch (e) {}
+      try {
+        player.release()
       } catch (e) {}
     },
 
-    // Stop talking and drop clips still on their way (TALK, New chat, Voice off).
+    // Stop talking and drop clips still on their way (TALK, New chat, Voice off, closing).
     stopVoice() {
       this.state.queue = null
-      this.stopPlayer()
+      this.endPlayer()
     },
 
     removeSpeechFile() {

@@ -15,6 +15,14 @@ export function splitAudio(buf, size = PIECE_BYTES) {
   return out.length ? out : [buf]
 }
 
+// Byte ranges of the pieces of a size-byte clip, so the watch can read one piece at a time from
+// the file instead of holding the whole clip (a 90 s clip is ~245 KB) in memory twice.
+export function pieceRanges(size, pieceBytes = PIECE_BYTES) {
+  const out = []
+  for (let start = 0; start < size; start += pieceBytes) out.push({ start, length: Math.min(pieceBytes, size - start) })
+  return out
+}
+
 // Phone side: pieces by rid. put() returns the whole clip once every piece is in, else null.
 // A resent piece just replaces itself; entries are dropped after keepMs.
 export function pieceStore({ keepMs = 5 * 60 * 1000, now = Date.now } = {}) {

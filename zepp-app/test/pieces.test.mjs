@@ -1,7 +1,7 @@
 // Run: node --test zepp-app/test/
 import test from 'node:test'
 import assert from 'node:assert'
-import { splitAudio, pieceStore, PIECE_BYTES } from '../shared/pieces.js'
+import { splitAudio, pieceRanges, pieceStore, PIECE_BYTES } from '../shared/pieces.js'
 
 const clip = (n) => Uint8Array.from({ length: n }, (_, i) => i % 251).buffer
 
@@ -45,4 +45,15 @@ test('pieceStore: old recordings are dropped', () => {
   t = 5000
   s.put('new', 1, 2, new Uint8Array(5))
   assert.strictEqual(s.missing('old'), null)
+})
+
+test('pieceRanges: same pieces as splitAudio, as byte ranges to read from the file one at a time', () => {
+  for (const size of [1, 20000, PIECE_BYTES, PIECE_BYTES + 1, 245000]) {
+    const ranges = pieceRanges(size)
+    const whole = new Uint8Array(clip(size))
+    const fromRanges = ranges.map(({ start, length }) => whole.slice(start, start + length))
+    assert.deepStrictEqual(fromRanges, splitAudio(clip(size)).map((p) => new Uint8Array(p)))
+    assert.ok(ranges.every((r) => r.length > 0 && r.length <= PIECE_BYTES))
+  }
+  assert.deepStrictEqual(pieceRanges(0), [])
 })
