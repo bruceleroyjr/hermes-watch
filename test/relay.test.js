@@ -30,6 +30,7 @@ async function setup(t, opts = {}) {
     log: line => logged.push(line),
     recordTurn: e => recorded.push(e),
     notify: text => notified.push(text),
+    geocode: opts.geocode || (async () => ''), // never the real map lookup in tests
     tts: async (text) => { if (opts.ttsFails) throw new Error('voice down'); spoken.push(text); return Buffer.from(`MP3:${text}`); },
   });
   const port = await listen(server);
@@ -266,6 +267,39 @@ test('ask text -> answer from Hermes in the watch session', async (t) => {
   assert.match(hermes.calls[0].session, /^watch-\d{8}-[0-9a-f]{6}$/);
   assert.strictEqual(hermes.calls[0].auth, 'Bearer hermes-key');
   assert.match(hermes.calls[0].user, /Never call send_text/);
+});
+
+test('watch GPS: the fix reaches Hermes next to the question and the log; none -> the reason is logged', async (t) => {
+  const { ask, hermes, logged } = await setup(t);
+  const r = await ask({ text: 'where is the nearest gas station', loc: { lat: 48.858372, lon: 2.294481, age_s: 2 } });
+  assert.strictEqual(r.heard, 'where is the nearest gas station'); // the screen never shows coordinates
+  assert.match(hermes.calls[0].user, /Watch GPS: .+ is at 48\.85837, 2\.29448 \(fixed 2 s ago\)/);
+  assert.ok(logged.includes('  gps: 48.85837, 2.29448 (2 s old)'));
+  await ask({ text: 'what time is it', gps: 'no fix yet' });
+  assert.doesNotMatch(hermes.calls[1].user, /Watch GPS/);
+  assert.ok(logged.includes('  gps: none (no fix yet)'));
+});
+
+test('watch GPS: the mapped place goes to Hermes with the fix (looked up while transcribing)', async (t) => {
+  const asked = [];
+  const { ask, hermes, logged } = await setup(t, { geocode: async (loc) => { asked.push(loc); return 'Eiffel Tower (attraction), 5, Avenue Anatole France'; } });
+  await ask({ text: 'what is this place', loc: { lat: 48.85826, lon: 2.2945, age_s: 5 } });
+  assert.strictEqual(asked.length, 1);
+  assert.match(hermes.calls[0].user, /The map lookup there says: Eiffel Tower \(attraction\), 5, Avenue Anatole France/);
+  assert.ok(logged.some(l => /gps: 48\.85826, 2\.2945 \(5 s old\) - Eiffel Tower/.test(l)));
+  await ask({ text: 'what is this place', gps: 'no fix yet' });
+  assert.strictEqual(asked.length, 1); // no fix, no lookup
+});
+
+test('unasked CONFIRM lines: an offer to text the user is dropped, a non-action question stays as text, no card', async (t) => {
+  const { ask, logged } = await setup(t);
+  assert.deepStrictEqual(await ask({ text: 'what is this place' }),
+    { ok: true, heard: 'what is this place', kind: 'answer', text: 'You are at the Eiffel Tower.' });
+  assert.deepStrictEqual(await ask({ text: 'price of bitcoin' }),
+    { ok: true, heard: 'price of bitcoin', kind: 'answer', text: 'Bitcoin is $100.\nWant me to check it again later?' });
+  assert.ok(logged.some(l => /unasked CONFIRM dropped: Send you a text/.test(l)));
+  const card = await ask({ text: 'draft an email to Ann' });
+  assert.strictEqual(card.kind, 'confirm'); // a real proposal keeps its Yes/No buttons
 });
 
 test('audio is transcribed first', async (t) => {

@@ -5,6 +5,9 @@
  * Hermes is slow (polled every 3 s for up to 10 min). Long answers scroll.
  * The watch closes the app when the screen times out; the current screen is saved and comes
  * back on reopen, and a reply that arrived meanwhile is fetched from the relay (/watch/last).
+ * GPS is on the whole time the app is open (a cold fix needs 30 s or more, and
+ * switching off after each question left follow-ups without one); each question carries the
+ * latest fix (shared/location.js) so Hermes knows where the user is.
  */
 import * as hmUI from '@zos/ui'
 import { getDeviceInfo } from '@zos/device'
@@ -14,7 +17,7 @@ import { queryPermission, requestPermission } from '@zos/app'
 import { scrollTo } from '@zos/page'
 import { localStorage } from '@zos/storage'
 import { setPageBrightTime, resetPageBrightTime, pauseDropWristScreenOff, resetDropWristScreenOff } from '@zos/display'
-import { Vibrator } from '@zos/sensor'
+import { Vibrator, Geolocation } from '@zos/sensor'
 import { BasePage } from '@zeppos/zml/base-page'
 import { buildEnvelope } from '../shared/envelope'
 import { untilPhoneWakes, phoneError, resendUntil, newRid, uploadAllowanceMs, ASK_ATTEMPT_MS, confirmAttemptMs } from '../shared/retry'
@@ -23,6 +26,7 @@ import { ringDots, dotColors, elapsedText, dotsText } from '../shared/spinner'
 import { DIAG } from '../shared/debug'
 import { speechQueue } from '../shared/speechqueue'
 import { pieceRanges } from '../shared/pieces'
+import { makeFix, locationFor } from '../shared/location'
 
 const FILE = 'clip.opus'
 const TRACE = 'close-trace'
@@ -41,6 +45,9 @@ const POLL_LIMIT_MS = 10 * 60 * 1000
 const WAIT_BRIGHT_MS = 10 * 60 * 1000 // screen stays on while recording and waiting
 const READ_BRIGHT_MS = 60 * 1000 // then a minute to read the answer
 const MIC = 'device:os.mic'
+const GEO = 'device:os.geolocation'
+const LAST_FIX = 'last-fix' // survives closing the app, for a question asked before GPS has a fix
+const GEO_ASKED = 'geo-asked' // the location permission is asked once, on open, never while recording
 const SAVED = 'last-screen'
 const VOICE_KEY = 'voice' // 'off' when the Voice button is switched off; on by default
 const LAST_TRIES = 6 // x 3 s: the relay answers or hands out a job within 12 s
@@ -52,6 +59,7 @@ const TEXT_W = W - 2 * MARGIN
 const GREEN = 0x1e8449
 const GREY = 0x5d6d7e
 const BLUE = 0x2471a3
+const VOICE_W = 158 // = round(466 * 0.34), the voice icon images' width
 
 // Waiting animation: a ring of dots round the screen edge with a chasing head (shared/spinner.js).
 const RING_N = 16
@@ -93,6 +101,23 @@ function withMic(onGranted, onDenied) {
   else if (result === 1) onDenied('The microphone is blocked. Allow it for Hermes in the watch settings.')
 }
 
+// Location is optional: anything but a clear "allowed" just means questions go without it.
+function geoAllowed() {
+  try {
+    return queryPermission({ permissions: [GEO] })[0] === GRANTED
+  } catch (e) {
+    return true // no permission API on this firmware: try the sensor
+  }
+}
+
+function askGeoOnce() {
+  try {
+    if (geoAllowed() || localStorage.getItem(GEO_ASKED, '')) return
+    localStorage.setItem(GEO_ASKED, '1')
+    requestPermission({ permissions: [GEO], callback: () => {} })
+  } catch (e) {}
+}
+
 function clipSize() {
   const st = statSync({ path: FILE })
   return (st && st.size) || 0
@@ -123,12 +148,17 @@ function textHeight(text, size) {
 Page(
   BasePage({
     state: { widgets: [], recorder: null, recording: false, busy: false, startedAt: 0, timers: [], poll: null, renderTimer: null, anim: null, waitSince: 0, resumeToken: 0,
-      voiceOn: true, player: null, playerReady: false, playing: false, speechId: null, speechFile: null, earlyFiles: [], queue: null },
+      voiceOn: true, player: null, playerReady: false, playing: false, speechId: null, speechFile: null, earlyFiles: [], queue: null,
+      gps: null, gpsOnChange: null, fix: null, gpsNote: '' },
 
     build() {
       this.state.player = null // each page gets its own player
       this.state.playerReady = false
       this.state.playing = false
+      this.state.gps = null
+      this.state.fix = null
+      askGeoOnce()
+      this.startGps() // stays on until the app closes
       try {
         this.state.voiceOn = localStorage.getItem(VOICE_KEY, 'on') !== 'off'
       } catch (e) {}
@@ -184,6 +214,8 @@ Page(
       this.trace('closing')
       this.stopVoice() // normally already released when the last clip finished
       this.trace('player closed')
+      this.stopGps() // never leave the app holding a sensor (the speaker rebooted the watch that way)
+      this.trace('gps closed')
       try {
         getApp()._options.globalData.onSpeechFile = null
         getApp()._options.globalData.onSpeechNote = null
@@ -205,6 +237,69 @@ Page(
       try {
         localStorage.setItem(TRACE, `${new Date().toISOString()} ${step}`)
       } catch (e) {}
+    },
+
+    // ------------------------------------------------------------------ location
+    startGps() {
+      if (this.state.gps) return
+      if (!geoAllowed()) {
+        this.state.gpsNote = 'location not allowed'
+        return
+      }
+      try {
+        const geo = new Geolocation()
+        try {
+          if (geo.getEnabled && geo.getEnabled() === false) {
+            this.state.gpsNote = 'location is off in the watch settings'
+            return
+          }
+        } catch (e) {}
+        const onChange = () => {
+          try {
+            if (geo.getStatus() !== 'A') return
+            const fix = makeFix(geo.getLatitude({ format: 'DD' }), geo.getLongitude({ format: 'DD' }), Date.now())
+            if (!fix) return
+            this.state.fix = fix
+            localStorage.setItem(LAST_FIX, JSON.stringify(fix))
+          } catch (e) {}
+        }
+        geo.onChange(onChange)
+        geo.start()
+        this.state.gps = geo
+        this.state.gpsOnChange = onChange
+        this.state.gpsNote = ''
+        onChange() // already fixed if another app had GPS on
+      } catch (e) {
+        this.state.gpsNote = `GPS error: ${errText(e)}`
+      }
+    },
+
+    stopGps() {
+      const geo = this.state.gps
+      if (!geo) return
+      if (this.state.gpsOnChange) this.state.gpsOnChange() // the latest fix, before it goes off
+      this.state.gps = null
+      try {
+        geo.offChange(this.state.gpsOnChange)
+      } catch (e) {}
+      try {
+        geo.stop()
+      } catch (e) {}
+      this.state.gpsOnChange = null
+    },
+
+    // {loc} for the question's header, or {gps: why not} so the PC log says why there was none.
+    whereAmI() {
+      if (this.state.gpsOnChange) this.state.gpsOnChange() // the very latest fix, in case no change event came
+      let fix = this.state.fix
+      if (!fix) {
+        try {
+          fix = JSON.parse(localStorage.getItem(LAST_FIX, '') || 'null')
+        } catch (e) {}
+      }
+      const loc = locationFor(fix, Date.now())
+      if (loc) return { loc }
+      return { gps: this.state.gpsNote || (fix ? 'last fix too old' : 'no fix yet') }
     },
 
     // ------------------------------------------------------------------ screens
@@ -263,7 +358,7 @@ Page(
         this.add(hmUI.widget.IMG, { x: Math.round((W - 124) / 2), y: Math.round(H * 0.08), src: 'icon.png' })
         y = this.text(Math.round(H * 0.36), m.note || 'Tap TALK and ask Hermes', 26, 0xffffff)
         y = this.button(y + 20, 'TALK', GREEN, talk)
-        this.voiceButton(y + 16, Math.round(W * 0.4), Math.round(W * 0.3))
+        this.voiceButton(y + 16)
       } else if (m.screen === 'listening') {
         y = this.text(Math.round(H * 0.3), `Listening... ${m.seconds || 0}s`, 34, 0x7fd4ff)
         this.button(y + 30, 'STOP', 0xc0392b, talk)
@@ -295,7 +390,7 @@ Page(
         const gap = 12
         const left = Math.round((W - 2 * bw - gap) / 2)
         this.button(y + 16, 'New chat', GREY, () => this.newChat(), bw, left)
-        y = this.voiceButton(y + 16, bw, left + bw + gap)
+        y = this.voiceButton(y + 16, left + bw + gap)
         this.add(hmUI.widget.TEXT, { x: 0, y: y + Math.round(H * 0.2), w: W, h: 2, text: '' }) // scroll room
       }
       try {
@@ -375,6 +470,7 @@ Page(
         if (!this.state.recorder) this.state.recorder = create(id.RECORDER)
         this.state.recorder.setFormat(codec.OPUS, { target_file: `data://${FILE}` })
         this.state.recorder.start()
+        this.startGps() // no-op unless it failed to start on open
       } catch (e) {
         return this.show({ screen: 'error', heard: '', text: `Could not start the microphone: ${errText(e)}` })
       }
@@ -419,8 +515,9 @@ Page(
       const ranges = pieceRanges(size)
       const n = ranges.length
       const opts = { contentType: 'bin', dataType: 'json' }
-      const envelope = (i) => buildEnvelope(n > 1 ? { kind: 'ask', speak: this.state.voiceOn, rid, part: i + 1, parts: n }
-        : { kind: 'ask', speak: this.state.voiceOn, rid }, readPiece(ranges[i]))
+      const where = this.whereAmI() // only the last piece (the question itself) needs it
+      const envelope = (i) => buildEnvelope({ kind: 'ask', speak: this.state.voiceOn, rid, ...(n > 1 ? { part: i + 1, parts: n } : {}),
+        ...(i === n - 1 ? where : {}) }, readPiece(ranges[i]))
       const piece = (i, tries = 1) => {
         this.show({ screen: 'thinking', heard: `Sending ${i + 1} of ${n}` })
         const extra = uploadAllowanceMs(ranges[i].length)
@@ -464,9 +561,15 @@ Page(
     },
 
     // ------------------------------------------------------------------ voice
-    voiceButton(y, w, x) {
-      const on = this.state.voiceOn
-      return this.button(y, on ? 'Voice on' : 'Voice off', on ? BLUE : GREY, () => this.toggleVoice(), w, x)
+    // A speaker icon instead of words: sound waves = Voice on, an X = off (images drawn by
+    // tools/voice-icons.py at VOICE_W x 80, the size of the New chat button beside it).
+    voiceButton(y, x = Math.round((W - VOICE_W) / 2)) {
+      const icon = this.state.voiceOn ? 'voice-on' : 'voice-off'
+      this.add(hmUI.widget.BUTTON, {
+        x, y, w: VOICE_W, h: 80, normal_src: `${icon}.png`, press_src: `${icon}-press.png`,
+        click_func: () => this.toggleVoice(),
+      })
+      return y + 80
     },
 
     toggleVoice() {

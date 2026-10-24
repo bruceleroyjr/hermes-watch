@@ -23,7 +23,7 @@ const { isResetCommand, formatForHud, truncateForHud, parsePcRestartCommand, can
   isPcHealthRequest, gatherPcHealthAsync } = require('./lib/voice-common');
 const { formatPcHealth } = require('./lib/pc-health');
 const actions = require('./lib/actions');
-const { watchSystemPrompt, withWatchRules, splitConfirm, WATCH_CHAR_BUDGET } = require('./lib/watch-prompt');
+const { watchSystemPrompt, withWatchRules, splitConfirm, confirmKind, cleanLocation, WATCH_CHAR_BUDGET } = require('./lib/watch-prompt');
 
 const IDLE_MS = 6 * 60 * 60 * 1000;
 const JOB_CAP_MS = 30 * 60 * 1000; // Claude Code builds can take 15 min
@@ -43,6 +43,36 @@ function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }
 
+// The mapped place at a GPS fix (OpenStreetMap Nominatim reverse lookup, free, ~1 request per
+// question), e.g. "Eiffel Tower (attraction), 5, Avenue Anatole France, Paris, ...". A model can't
+// reliably tell a building from bare coordinates. '' when the lookup fails or takes over 3 s.
+const placeCache = new Map(); // ~10 m grid -> place
+function reverseGeocode({ lat, lon }) {
+  const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+  if (placeCache.has(key)) return Promise.resolve(placeCache.get(key));
+  return new Promise((resolve) => {
+    const req = https.get(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&lat=${lat}&lon=${lon}`,
+      { headers: { 'User-Agent': 'hermes-watch-relay/1.0 (personal use)', 'Accept-Language': 'en' } }, (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          let place = '';
+          try {
+            const j = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            const where = String(j.display_name || '').split(', ').slice(0, 6).join(', ');
+            place = j.name && !where.startsWith(j.name) ? `${j.name}, ${where}` : where;
+            if (j.name && j.type && j.type !== 'yes') place = place.replace(j.name, `${j.name} (${String(j.type).replace(/_/g, ' ')})`);
+          } catch { /* '' */ }
+          if (placeCache.size > 500) placeCache.clear();
+          if (res.statusCode === 200 && place) placeCache.set(key, place);
+          resolve(res.statusCode === 200 ? place : '');
+        });
+      });
+    req.setTimeout(3000, () => req.destroy(new Error('timed out')));
+    req.on('error', () => resolve(''));
+  });
+}
+
 function createServer(opts) {
   const log = opts.log || (() => {});
   const runAction = opts.runAction || actions.runAction;
@@ -52,6 +82,7 @@ function createServer(opts) {
   const recordTurn = opts.recordTurn || (() => {});
   const tts = opts.tts || ((text) => postTts(new URL('/tts', opts.sttUrl), text));
   const notify = opts.notify || (() => {});
+  const geocode = opts.geocode || reverseGeocode;
   const jobs = new Map();
 
   let session = readJson(opts.sessionFile);
@@ -79,14 +110,14 @@ function createServer(opts) {
 
   // A Hermes turn, streamed: the text is collected, and approval requests (Claude Code edits and
   // builds, dangerous commands) are handed to onApproval while Hermes waits for the answer.
-  function askHermes(sessionId, userText, onApproval = () => {}, { confirmed = false } = {}) {
+  function askHermes(sessionId, userText, onApproval = () => {}, { confirmed = false, loc = null, gps = '' } = {}) {
     let up;
     const promise = new Promise((resolve) => {
       let settled = false;
       const done = (r) => { if (!settled) { settled = true; resolve(r); } };
       const body = Buffer.from(JSON.stringify({ model: 'hermes-agent', stream: true, messages: [
         { role: 'system', content: watchSystemPrompt() },
-        { role: 'user', content: withWatchRules(userText, { confirmed }) }] }));
+        { role: 'user', content: withWatchRules(userText, { confirmed, loc, gps }) }] }));
       up = http.request({ host: '127.0.0.1', port: opts.hermesPort, method: 'POST', path: '/v1/chat/completions', headers: {
         authorization: `Bearer ${opts.hermesKey}`, 'content-type': 'application/json', 'content-length': body.length,
         'x-hermes-session-id': sessionId } }, (res) => {
@@ -150,6 +181,11 @@ function createServer(opts) {
     const { text, confirm } = splitConfirm(r.text);
     const body = truncateForHud(formatForHud(text), WATCH_CHAR_BUDGET);
     if (!confirm) return { ok: true, heard, kind: 'answer', text: body };
+    const kind = confirmKind(heard, confirm);
+    if (kind !== 'card') {
+      log(`  unasked CONFIRM ${kind === 'drop' ? 'dropped' : 'shown as text'}: ${confirm.slice(0, 80)}`);
+      return { ok: true, heard, kind: 'answer', text: kind === 'plain' && body ? `${body}\n${confirm}` : body || confirm };
+    }
     const id = actions.createPending({ kind: 'hermes', question: confirm });
     return { ok: true, heard, kind: 'confirm', text: body ? `${body}\n${confirm}` : confirm, id, ttlMs: actions.HERMES_CARD_TTL_MS };
   }
@@ -180,7 +216,7 @@ function createServer(opts) {
     return { ok: true, heard: entry.heard, kind: 'working', job, ...(entry.approved ? { note: BUILD_NOTE } : {}) };
   }
 
-  async function hermesTurn(heard, userText, started, { confirmed = false } = {}) {
+  async function hermesTurn(heard, userText, started, { confirmed = false, loc = null, gps = '' } = {}) {
     const sessionId = currentSession();
     const job = crypto.randomBytes(9).toString('base64url');
     const entry = { heard, at: Date.now(), reply: null, card: null, approved: false, wake: null };
@@ -194,7 +230,7 @@ function createServer(opts) {
       entry.card = { ok: true, heard, kind: 'confirm', approve: true, text: truncateForHud(formatForHud(asked), WATCH_CHAR_BUDGET), id };
       log(`  approval asked (${ev.pattern_key || 'approval'}) card=${id} job=${job}`);
       if (entry.wake) entry.wake();
-    }, { confirmed });
+    }, { confirmed, loc, gps });
     const cap = setTimeout(() => turn.cancel('stopped waiting after 30 min'), JOB_CAP_MS);
     turn.promise.then((done) => {
       clearTimeout(cap);
@@ -255,6 +291,10 @@ function createServer(opts) {
 
   async function ask(body) {
     const started = Date.now();
+    // The watch's GPS fix (Hermes gets it next to the question), or the watch's reason for none.
+    // The place name is looked up while the question is transcribed.
+    const loc = cleanLocation(body.loc);
+    const place = loc ? geocode(loc).catch(() => '') : Promise.resolve('');
     let heard = typeof body.text === 'string' ? body.text.trim() : '';
     if (body.audio_b64 !== undefined) {
       const stt = await transcribe(Buffer.from(String(body.audio_b64), 'base64'));
@@ -262,6 +302,10 @@ function createServer(opts) {
       heard = stt.text;
     }
     log(`ask: ${heard.slice(0, 120)}`);
+    if (loc) {
+      loc.place = await place;
+      log(`  gps: ${loc.lat}, ${loc.lon} (${loc.age_s} s old)${loc.place ? ` - ${loc.place.slice(0, 100)}` : ''}`);
+    } else if (body.gps) log(`  gps: none (${String(body.gps).slice(0, 80)})`);
     if (!heard) return { ok: true, heard, kind: 'answer', text: "I didn't catch that." };
     if (isResetCommand(heard)) {
       session = { id: newSessionId() };
@@ -286,7 +330,7 @@ function createServer(opts) {
       return answered(heard, { ok: true, heard, kind: 'confirm', text: action.summary, id });
     }
     denyPending();
-    return hermesTurn(heard, heard, started);
+    return hermesTurn(heard, heard, started, { loc, gps: loc ? '' : String(body.gps || '') });
   }
 
   async function confirm(body) {

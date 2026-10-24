@@ -87,7 +87,8 @@ function ask(buf) {
     if (h.part < h.parts) return Promise.resolve({ ok: true, got: h.part })
     if (!audio) return Promise.resolve({ ok: false, error: `Part of the recording got lost (piece ${pieces.missing(String(h.rid)).join(', ')}). Try again.` })
   }
-  return call('POST', '/watch/ask', { audio_b64: base64(audio), rid: h.rid || newRid(), speak: !!h.speak })
+  // The watch's GPS fix (loc), or why there is none (gps), rides along on the question.
+  return call('POST', '/watch/ask', { audio_b64: base64(audio), rid: h.rid || newRid(), speak: !!h.speak, loc: h.loc, gps: h.gps })
 }
 
 // Short status lines into the relay log (POST /watch/diag), because this side service's own

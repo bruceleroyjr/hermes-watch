@@ -1,7 +1,58 @@
 // Run: node --test "test/*.test.js"
 const test = require('node:test');
 const assert = require('node:assert');
-const { watchSystemPrompt, withWatchRules, splitConfirm } = require('../lib/watch-prompt');
+const { watchSystemPrompt, withWatchRules, splitConfirm, confirmKind, cleanLocation } = require('../lib/watch-prompt');
+
+test('confirmKind: unasked offers to text/email the user are dropped, non-actions become text, real proposals stay cards', () => {
+  const cases = [
+    ['What is this place? Tell me a little about it.', 'Send you a text with these details?', 'drop'],
+    ['How do we get there from here?', 'Shall I text you directions once you tell me which one?', 'drop'],
+    ['How much is Bitcoin?', 'Want me to check it again later?', 'plain'],
+    ["What's the price of Bitcoin?", 'Want me to set up a Bitcoin price check?', 'plain'],
+    ['help me figure out what AI model I can run locally', 'Want me to suggest one and walk you through installing it?', 'plain'],
+    ["no, don't", 'Do you need anything else right now?', 'plain'],
+    ['Text Alex saying hi.', 'Send Alex a text saying hi?', 'card'],
+    ['send an email to myself saying hi', 'Shall I send this email to yourself?', 'card'],
+    ['Who is the person that this is getting sent to?', 'Should I send this email to you?', 'card'],
+    ['Open the frunk.', 'Open the frunk?', 'card'],
+    ['text me the address', 'Send you a text with the address?', 'card'],
+    ['', 'Send it?', 'card'], // a Yes turn
+  ];
+  for (const [heard, confirm, want] of cases) assert.strictEqual(confirmKind(heard, confirm), want, `${heard} -> ${confirm}`);
+});
+
+test('the rules say never to offer to text or email the user the answer', () => {
+  for (const text of [watchSystemPrompt(), withWatchRules('hi')]) assert.match(text, /Never offer to text, email or send the user the answer/);
+});
+
+test('watch GPS goes next to the question, only when there is a real fix', () => {
+  const text = withWatchRules("what's the closest coffee shop", { loc: { lat: 48.858372, lon: 2.294481, age_s: 4, place: 'Eiffel Tower' } });
+  assert.match(text, /Watch GPS: .+ is at 48\.85837, 2\.29448 \(fixed 4 s ago\)\. The map lookup there says: Eiffel Tower/);
+  assert.match(text, /instead of the default location/);
+  assert.match(text, /Rule for this answer: Never call send_text/); // the other rules are still there
+  assert.match(withWatchRules('hi', { loc: { lat: 48.85, lon: 2.29, age_s: 300 } }), /fixed 5 min ago/);
+  for (const loc of [null, undefined, {}, { lat: 0, lon: 0 }, { lat: 'x', lon: 1 }, { lat: 95, lon: 1 }]) {
+    assert.doesNotMatch(withWatchRules('hi', { loc }), /Watch GPS/, JSON.stringify(loc));
+  }
+  assert.doesNotMatch(withWatchRules('yes, go ahead', { confirmed: true, loc: { lat: 48.85, lon: 2.29 } }), /Watch GPS/);
+});
+
+test('cleanLocation: numbers checked and rounded, age never negative', () => {
+  assert.deepStrictEqual(cleanLocation({ lat: '48.8583722', lon: 2.2944813, age_s: -3 }), { lat: 48.85837, lon: 2.29448, age_s: 0 });
+  assert.strictEqual(cleanLocation({ lat: 21, lon: 200 }), null);
+});
+
+test('no GPS fix: a where-am-I question is told to say so, not to try other location tools', () => {
+  for (const said of ["Can you tell me where I'm located right now indoors?", 'where am I', "what's the nearest gas station",
+    'what is this place', 'tell me about this building', "what's good to eat around here"]) {
+    const text = withWatchRules(said, { gps: 'no fix yet' });
+    assert.match(text, /Watch GPS: no position right now \(no fix yet\)/, said);
+    assert.match(text, /Do not use any other location tool/, said);
+  }
+  assert.doesNotMatch(withWatchRules('what is 12 times 7', { gps: 'no fix yet' }), /Watch GPS/);
+  assert.doesNotMatch(withWatchRules('where am I'), /Watch GPS/); // older watch build: says nothing about GPS
+  assert.doesNotMatch(withWatchRules('where am I', { loc: { lat: 48.85, lon: 2.29 }, gps: 'x' }), /no position/);
+});
 
 test('CONFIRM is only for actions; other follow-ups are plain questions', () => {
   for (const text of [watchSystemPrompt(), withWatchRules('hi')]) {

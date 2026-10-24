@@ -41,6 +41,8 @@ async function fakeHermes() {
       let content = `echo: ${first}`;
       if (/draft/.test(first)) content = 'Draft to Ann: Hi\nCONFIRM: Send this email?';
       if (/long/.test(first)) content = 'word '.repeat(600);
+      if (/this place/.test(first)) content = 'You are at the Eiffel Tower.\nCONFIRM: Send you a text with these details?';
+      if (/bitcoin/i.test(first)) content = 'Bitcoin is $100.\nCONFIRM: Want me to check it again later?';
       if (body.stream) {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         res.write(sse('', { choices: [{ delta: { role: 'assistant' } }] }));

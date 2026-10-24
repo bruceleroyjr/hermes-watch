@@ -9,8 +9,8 @@ Built for the Amazfit Active 2 (Zepp OS); other round Zepp OS 4 watches should n
 ## What it does
 
 - **Voice in, text and voice out.** The watch records Opus audio; your PC transcribes it with Whisper and asks
-  Hermes. The answer appears as text first, then the watch reads it out (a **Voice on/off** button turns this
-  off). Speech never delays the text: it is made in parallel and follows 1-3 s later for normal answers.
+  Hermes. The answer appears as text first, then the watch reads it out (a speaker-icon button turns voice
+  on and off). Speech never delays the text: it is made in parallel and follows 1-3 s later for normal answers.
 - **Long conversations.** Every question continues the same Hermes session until 6 idle hours pass, or you
   tap **New chat** or say "start new session".
 - **Approve / Deny on the watch.** When Hermes asks for approval (for example Claude Code wanting to edit
@@ -22,6 +22,12 @@ Built for the Amazfit Active 2 (Zepp OS); other round Zepp OS 4 watches should n
 - **Safe actions.** Texts, car commands and a PC restart are recognised in plain code, never by the model,
   and only run after you tap **Yes**.
 - **Quick local answers.** "PC health check" is answered by the relay itself in a few seconds.
+- **Knows where you are.** GPS stays on while the app is open, and each question carries the latest fix.
+  The relay looks up the place at that spot on OpenStreetMap, so "What is this place?", "What's good to eat
+  around here?" or "How far is the airport?" get answers about where you actually are. Indoors the watch
+  often can't get a fix; Hermes then says so instead of guessing. A cold fix outdoors can take 30 s or more.
+- **No unasked Yes/No cards.** If Hermes ends an answer with an offer nobody asked for ("Send you a text
+  with these details?"), the relay drops it or shows it as plain text; real action proposals keep their buttons.
 
 ## How it works
 
@@ -117,7 +123,8 @@ Run the PC parts as scheduled tasks if you want them to start with Windows.
 
 All but `/health` need `Authorization: Bearer <token>`.
 
-- `POST /watch/ask` `{audio_b64}` or `{text}` -> `{ok, heard, kind: answer|confirm|working, text, id?, job?, approve?}`
+- `POST /watch/ask` `{audio_b64}` or `{text}`, plus `loc: {lat, lon, age_s}` (the watch's GPS fix) or
+  `gps: "<why there is none>"` -> `{ok, heard, kind: answer|confirm|working, text, id?, job?, approve?}`
 - `POST /watch/confirm` `{id, yes}` -> the next reply (Yes/No cards last 60 s, Approve cards ~5 min)
 - `GET /watch/result?job=` -> `{kind: working}` until a slow answer (or the next Approve card) is ready
 - `GET /watch/last` -> the latest reply plus `ago_ms`, for a watch that closed mid-question
@@ -135,6 +142,10 @@ All but `/health` need `Authorization: Bearer <token>`.
   (`zepp-app/app-side/token.js`, git-ignored).
 - Hermes is told never to call text/car tools itself; those run only through the relay's Yes cards.
 - Approvals are always "once": nothing is approved for the rest of a session from the watch.
+- **Location:** each question's GPS coordinates go to your Hermes model provider (with the question) and to
+  OpenStreetMap's public Nominatim service (for the place name; ~1 request per question, cached ~10 m).
+  The relay log records them too. To turn location off, remove `device:os.geolocation` from
+  `zepp-app/app.json` (or deny the permission on the watch).
 
 ## Troubleshooting
 
