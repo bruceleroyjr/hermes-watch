@@ -22,7 +22,7 @@ import { BasePage } from '@zeppos/zml/base-page'
 import { buildEnvelope } from '../shared/envelope'
 import { untilPhoneWakes, phoneError, resendUntil, newRid, uploadAllowanceMs, ASK_ATTEMPT_MS, confirmAttemptMs } from '../shared/retry'
 import { screenFor, pollStep, resumeFor, lastIsNew } from '../shared/screens'
-import { ringDots, dotColors, elapsedText, dotsText } from '../shared/spinner'
+import { ringDots, dotColors, elapsedText, dotsText, statusWord, THINKING_WORDS, WORKING_WORDS } from '../shared/spinner'
 import { DIAG } from '../shared/debug'
 import { speechQueue } from '../shared/speechqueue'
 import { pieceRanges } from '../shared/pieces'
@@ -67,8 +67,8 @@ const RING_N = 16
 const RING = ringDots(RING_N, Math.round(W / 2), Math.round(H / 2), Math.round(W / 2) - 18)
 const DOT_R = 7
 const SPIN = {
-  thinking: { head: 0x7fd4ff, dim: 0x13222c, tickMs: 70, label: 'Thinking' },
-  working: { head: 0xf5b041, dim: 0x2a1f0e, tickMs: 130, label: 'Still working' },
+  thinking: { head: 0x7fd4ff, dim: 0x13222c, tickMs: 70, label: 'Thinking', words: THINKING_WORDS },
+  working: { head: 0xf5b041, dim: 0x2a1f0e, tickMs: 130, label: 'Still working', words: WORKING_WORDS },
 }
 
 const errText = (e) => (e && e.message ? e.message : String(e))
@@ -399,13 +399,16 @@ Page(
       } catch (e) {}
     },
 
-    // Thinking / Still working: spinning ring, Hermes icon, label with cycling dots, time waited.
+    // Thinking / Still working: spinning ring, Hermes icon, a playful word with cycling dots, time waited.
     renderWaiting(m) {
       const spin = SPIN[m.screen]
+      const offset = Math.floor(Math.random() * spin.words.length) // a different first word each wait
+      const word = () => statusWord(spin.words, Date.now() - shownAt, offset)
+      const shownAt = Date.now()
       const dots = RING.map((p) => this.add(hmUI.widget.CIRCLE, { center_x: p.x, center_y: p.y, radius: DOT_R, color: spin.dim }))
       this.add(hmUI.widget.IMG, { x: Math.round((W - 124) / 2), y: 72, src: 'icon.png' })
       const label = this.add(hmUI.widget.TEXT, {
-        x: MARGIN, y: 206, w: TEXT_W, h: 44, text: `${spin.label}.`, text_size: 32, color: spin.head,
+        x: MARGIN, y: 206, w: TEXT_W, h: 44, text: `${word()}.`, text_size: 32, color: spin.head,
         align_h: hmUI.align.CENTER_H,
       })
       const since = this.state.waitSince || Date.now()
@@ -426,7 +429,7 @@ Page(
         for (let i = 0; i < RING_N; i++) {
           dots[i].setProperty(hmUI.prop.MORE, { center_x: RING[i].x, center_y: RING[i].y, radius: DOT_R, color: colors[i] })
         }
-        if (step % 6 === 0) label.setProperty(hmUI.prop.TEXT, `${this.state.waking ? 'Waking the phone' : spin.label}${dotsText(step / 6)}`)
+        if (step % 6 === 0) label.setProperty(hmUI.prop.TEXT, `${this.state.waking ? 'Waking the phone' : word()}${dotsText(step / 6)}`)
         const t = elapsedText(Date.now() - since)
         if (t !== shown) clock.setProperty(hmUI.prop.TEXT, (shown = t))
       }, spin.tickMs)

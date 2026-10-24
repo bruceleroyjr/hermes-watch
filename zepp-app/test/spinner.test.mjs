@@ -1,7 +1,7 @@
 // Run (in zepp-app): node --test test/*.test.mjs
 import test from 'node:test'
 import assert from 'node:assert'
-import { ringDots, dotColors, blend, elapsedText, dotsText } from '../shared/spinner.js'
+import { ringDots, dotColors, blend, elapsedText, dotsText, statusWord, THINKING_WORDS, WORKING_WORDS } from '../shared/spinner.js'
 
 test('dots sit evenly on a circle, first at 12 o\'clock', () => {
   const d = ringDots(4, 233, 233, 200)
@@ -38,4 +38,14 @@ test('elapsed time reads m:ss', () => {
 
 test('thinking dots cycle . .. ...', () => {
   assert.deepStrictEqual([0, 1, 2, 3].map(dotsText), ['.', '..', '...', '.'])
+})
+
+test('status word changes every 3 s, starts at the offset and wraps', () => {
+  const w = ['a', 'b', 'c']
+  assert.deepStrictEqual([0, 2999, 3000, 6000, 9000].map((ms) => statusWord(w, ms)), ['a', 'a', 'b', 'c', 'a'])
+  assert.strictEqual(statusWord(w, 0, 2), 'c')
+})
+
+test('status words fit one line on the round screen', () => {
+  for (const word of [...THINKING_WORDS, ...WORKING_WORDS]) assert.ok(word.length <= 13, word)
 })

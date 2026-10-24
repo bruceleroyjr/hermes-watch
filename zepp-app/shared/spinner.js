@@ -43,3 +43,19 @@ export function elapsedText(ms) {
 export function dotsText(step) {
   return '.'.repeat((step % 3) + 1)
 }
+
+// Playful labels for the waiting screen (in the spirit of Claude Code's "Musing",
+// "Percolating"). Short enough for one 32 px line with the dots. Blue = thinking, gold = a long job.
+export const THINKING_WORDS = [
+  'Musing', 'Pondering', 'Percolating', 'Conjuring', 'Divining', 'Mulling', 'Brewing', 'Noodling',
+  'Ruminating', 'Scheming', 'Winging it', 'Consulting', 'Deliberating', 'Cogitating', 'Tinkering',
+]
+export const WORKING_WORDS = [
+  'Still at it', 'Marinating', 'Simmering', 'Untangling', 'Deep diving', 'Flying back', 'Crunching',
+  'Spelunking', 'Wrangling', 'Excavating', 'Assembling', 'Almost there',
+]
+
+// The word to show `ms` into the wait: a new one every `everyMs`, starting at `offset`.
+export function statusWord(words, ms, offset = 0, everyMs = 3000) {
+  return words[(offset + Math.floor(ms / everyMs)) % words.length]
+}
