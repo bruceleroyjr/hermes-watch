@@ -150,7 +150,8 @@ All but `/health` need `Authorization: Bearer <token>`.
 ## Troubleshooting
 
 - **"The phone isn't answering" / "shake timeout"**: Bluetooth is up but iOS put the Zepp app to sleep. Open
-  Zepp on the phone; turn on Background App Refresh for it. The watch already retries for 30 s.
+  Zepp on the phone; turn on Background App Refresh for it. The watch already retries for 30 s, showing
+  "Waking the phone" and "Open the Zepp app on your iPhone" meanwhile.
 - **Nothing reaches the PC**: check that the phone is connected to Tailscale (`tailscale ping <phone>`).
 - **Voice is silent or late**: set `DIAG = true` in `zepp-app/shared/debug.js`, reinstall, and read the
   `phone:` / `watch:` lines in `relay.log` (download, Bluetooth transfer, file arrived, player).

@@ -37,6 +37,7 @@ const POLL_MS = 3000
 // the answer waited on the PC.
 const POLL_STUCK_MS = 25000
 const WAKE_MS = 30000 // keep retrying while iOS wakes the Zepp app ("shake timeout")
+const OPEN_ZEPP = 'Open the Zepp app on your iPhone'
 // A request with no reply after ASK_ATTEMPT_MS / confirmAttemptMs (shared/retry.js) was lost between
 // the PC and the iPhone: the watch sends it again with the same request id.
 const PIECE_TRIES = 4 // a piece of a long recording that failed or got no reply is sent again
@@ -753,13 +754,23 @@ Page(
     },
 
     // request() to the phone, retried for up to 30 s while iOS wakes the Zepp app ("shake timeout");
-    // the waiting screen says "Waking the phone" meanwhile.
+    // the waiting screen says "Waking the phone" meanwhile, with a line telling the user to open Zepp
+    // (a closed Zepp app looks like this every time, and the label alone didn't say what to do).
     phoneRequest(req, opts) {
+      const waitingScreen = () => this.model && SPIN[this.model.screen]
       const done = (r) => {
         this.state.waking = false
+        if (waitingScreen() && this.model.note === OPEN_ZEPP) this.show({ ...this.model, note: this.state.noteBeforeWake || '' })
         return r
       }
-      return untilPhoneWakes(() => this.request(req, opts), { budgetMs: WAKE_MS, onWait: () => (this.state.waking = true) })
+      const onWait = () => {
+        this.state.waking = true
+        if (waitingScreen() && this.model.note !== OPEN_ZEPP) {
+          this.state.noteBeforeWake = this.model.note
+          this.show({ ...this.model, note: OPEN_ZEPP })
+        }
+      }
+      return untilPhoneWakes(() => this.request(req, opts), { budgetMs: WAKE_MS, onWait })
         .then(done, (e) => Promise.reject(done(e)))
     },
 
