@@ -7,6 +7,7 @@
  * - confirm {id, yes}           -> POST /watch/confirm
  * - result {job}                -> POST /watch/result {job}
  * - last                        -> GET /watch/last (reply missed while the watch app was closed)
+ * - rate {rate, kind}           -> POST /watch/rate (thumbs up / down under an answer; kind none = undo)
  * - newChat                     -> POST /watch/ask {text: 'start new session'} (New chat button)
  * - speech {id, parts}          -> GET /watch/speech?id=&part=N (MP3 per clip), sent on to the watch as files
  * - diag {events}               -> POST /watch/diag (only when shared/debug.js DIAG is on)
@@ -197,6 +198,7 @@ AppSideService(
         diag('watch', ...(Array.isArray(p.events) ? p.events : []))
         work = Promise.resolve({ ok: true })
       }
+      else if (req.method === 'rate') work = call('POST', '/watch/rate', { rate: p.rate || '', kind: p.kind || '' }, POLL_MS)
       else if (req.method === 'last') work = call('GET', '/watch/last', null, POLL_MS)
       else if (req.method === 'newChat') work = call('POST', '/watch/ask', { text: 'start new session', rid: p.rid || newRid() })
       else work = Promise.resolve({ ok: false, error: `unknown request ${req.method}` })

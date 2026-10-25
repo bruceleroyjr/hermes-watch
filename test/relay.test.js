@@ -17,6 +17,7 @@ async function setup(t, opts = {}) {
   const notified = [];
   const spoken = [];
   const logged = [];
+  const rated = [];
   const server = createServer({
     token: TOKEN,
     hermesKey: 'hermes-key',
@@ -29,6 +30,7 @@ async function setup(t, opts = {}) {
     runAction: async (a) => { ran.push(a); return { ok: true, message: `Sent to ${a.contact}.` }; },
     log: line => logged.push(line),
     recordTurn: e => recorded.push(e),
+    recordRating: e => rated.push(e),
     notify: text => notified.push(text),
     geocode: opts.geocode || (async () => ''), // never the real map lookup in tests
     tts: async (text) => { if (opts.ttsFails) throw new Error('voice down'); spoken.push(text); return Buffer.from(`MP3:${text}`); },
@@ -46,11 +48,57 @@ async function setup(t, opts = {}) {
     const res = await fetch(`http://127.0.0.1:${port}/watch/speech?id=${id}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
     return { status: res.status, type: res.headers.get('content-type'), body: Buffer.from(await res.arrayBuffer()).toString() };
   };
-  return { hermes, ran, recorded, notified, spoken, logged, call, speech, ask: b => call('POST', '/watch/ask', b).then(r => r.json),
+  return { hermes, ran, recorded, notified, spoken, logged, rated, call, speech, ask: b => call('POST', '/watch/ask', b).then(r => r.json),
+    rate: b => call('POST', '/watch/rate', b).then(r => r.json),
     confirm: b => call('POST', '/watch/confirm', b).then(r => r.json) };
 }
 
 const sleep = ms => new Promise(res => setTimeout(res, ms));
+const noRate = ({ rate, ...reply }) => reply; // answers carry a random rate id
+
+test('rating: a Hermes answer carries a rate id; a tap saves the question and reply, a second tap undoes it', async (t) => {
+  const { ask, rate, rated } = await setup(t);
+  const r = await ask({ text: 'what is a roth ira' });
+  assert.match(r.rate, /^[0-9a-f]{12}$/);
+  assert.deepStrictEqual(await rate({ rate: r.rate, kind: 'down' }), { ok: true, kind: 'down' });
+  assert.deepStrictEqual(await rate({ rate: r.rate, kind: 'none' }), { ok: true, kind: 'none' });
+  assert.strictEqual(rated.length, 2);
+  assert.strictEqual(rated[0].kind, 'down');
+  assert.strictEqual(rated[0].question, 'what is a roth ira');
+  assert.strictEqual(rated[0].reply, 'echo: what is a roth ira');
+  assert.match(rated[0].session, /^watch-\d{8}-[0-9a-f]{6}$/);
+  assert.strictEqual(rated[1].kind, 'none');
+});
+
+test('rating: a slow answer collected by polling and /watch/last keep the rate id', async (t) => {
+  const { ask, call } = await setup(t, { deadlineMs: 500 });
+  const r = await ask({ text: 'slow question' });
+  assert.strictEqual(r.kind, 'working');
+  await sleep(2200);
+  const done = (await call('POST', '/watch/result', { job: r.job })).json;
+  assert.match(done.rate, /^[0-9a-f]{12}$/);
+  assert.strictEqual((await call('GET', '/watch/last')).json.rate, done.rate);
+});
+
+test('rating: PC health is rateable; errors, new session and cards are not', async (t) => {
+  const health = JSON.stringify({ cpuLoadPct: 10, memTotalGB: 16, memUsedGB: 8, memUsedPct: 50, uptime: '1d 2h 3m', disks: [], topMemory: [] });
+  const { ask } = await setup(t, { health });
+  assert.match((await ask({ text: 'PC health check' })).rate, /^[0-9a-f]{12}$/);
+  assert.strictEqual((await ask({ text: 'start new session' })).rate, undefined);
+  assert.strictEqual((await ask({ text: 'draft an email to Ann' })).rate, undefined); // a Yes/No card
+  assert.strictEqual((await ask({ text: 'text Alex saying hi' })).rate, undefined);
+  const down = await setup(t, { noHermes: true });
+  assert.strictEqual((await down.ask({ text: 'hello' })).rate, undefined); // "Hermes isn't running"
+});
+
+test('rating: unknown ids and bad kinds are refused and nothing is saved; token needed', async (t) => {
+  const { ask, rate, rated, call } = await setup(t);
+  const r = await ask({ text: 'hi' });
+  assert.strictEqual((await rate({ rate: 'nope', kind: 'up' })).ok, false);
+  assert.strictEqual((await rate({ rate: r.rate, kind: 'meh' })).ok, false);
+  assert.strictEqual((await call('POST', '/watch/rate', { rate: r.rate, kind: 'up' }, 'wrong')).status, 401);
+  assert.strictEqual(rated.length, 0);
+});
 
 test('voice on: an answer gets a speech id; the MP3 is started right away and served from /watch/speech', async (t) => {
   const { ask, speech, spoken } = await setup(t);
@@ -207,7 +255,7 @@ test('approval: Claude Code asks -> Approve card; Approve -> answer, once, Teleg
   assert.strictEqual(card.approve, true);
   assert.match(card.text, /^Claude Code wants to change files in my-project:\nstep 1: build a tide job\nApprove this change\?$/);
   const done = await confirm({ id: card.id, yes: true });
-  assert.deepStrictEqual(done, { ok: true, kind: 'answer', text: 'Built: build a tide job' });
+  assert.deepStrictEqual(noRate(done), { ok: true, kind: 'answer', text: 'Built: build a tide job' });
   assert.deepStrictEqual(hermes.approvals.map(a => [a.run, a.choice, a.request_id, a.auth]), [['run-1', 'once', 'req-1', 'Bearer hermes-key']]);
   assert.deepStrictEqual(notified, ['From the watch: build a tide job\n\nBuilt: build a tide job']);
 });
@@ -263,7 +311,7 @@ test('no token -> 401', async (t) => {
 test('ask text -> answer from Hermes in the watch session', async (t) => {
   const { ask, hermes } = await setup(t);
   const r = await ask({ text: 'what time is it' });
-  assert.deepStrictEqual(r, { ok: true, heard: 'what time is it', kind: 'answer', text: 'echo: what time is it' });
+  assert.deepStrictEqual(noRate(r), { ok: true, heard: 'what time is it', kind: 'answer', text: 'echo: what time is it' });
   assert.match(hermes.calls[0].session, /^watch-\d{8}-[0-9a-f]{6}$/);
   assert.strictEqual(hermes.calls[0].auth, 'Bearer hermes-key');
   assert.match(hermes.calls[0].user, /Never call send_text/);
@@ -293,9 +341,9 @@ test('watch GPS: the mapped place goes to Hermes with the fix (looked up while t
 
 test('unasked CONFIRM lines: an offer to text the user is dropped, a non-action question stays as text, no card', async (t) => {
   const { ask, logged } = await setup(t);
-  assert.deepStrictEqual(await ask({ text: 'what is this place' }),
+  assert.deepStrictEqual(noRate(await ask({ text: 'what is this place' })),
     { ok: true, heard: 'what is this place', kind: 'answer', text: 'You are at the Eiffel Tower.' });
-  assert.deepStrictEqual(await ask({ text: 'price of bitcoin' }),
+  assert.deepStrictEqual(noRate(await ask({ text: 'price of bitcoin' })),
     { ok: true, heard: 'price of bitcoin', kind: 'answer', text: 'Bitcoin is $100.\nWant me to check it again later?' });
   assert.ok(logged.some(l => /unasked CONFIRM dropped: Send you a text/.test(l)));
   const card = await ask({ text: 'draft an email to Ann' });
@@ -374,7 +422,7 @@ test('PC health check -> answered by the relay, not Hermes', async (t) => {
     disks: [{ drive: 'C:', freeGB: 100, freePct: 30 }], topMemory: [], unexpectedShutdowns30d: 0 });
   const { ask, hermes } = await setup(t, { health });
   const r = await ask({ text: 'PC health check' });
-  assert.deepStrictEqual(r, { ok: true, heard: 'PC health check', kind: 'answer', text: 'Healthy\nCPU 10%, RAM 8 of 16 GB\nC: 100 GB free\nUp 1d 2h' });
+  assert.deepStrictEqual(noRate(r), { ok: true, heard: 'PC health check', kind: 'answer', text: 'Healthy\nCPU 10%, RAM 8 of 16 GB\nC: 100 GB free\nUp 1d 2h' });
   assert.strictEqual(hermes.calls.length, 0);
 });
 
@@ -442,7 +490,7 @@ test('slow hermes -> job -> result', async (t) => {
   assert.strictEqual((await call('GET', `/watch/result?job=${r.job}`)).json.kind, 'working');
   await new Promise(res => setTimeout(res, 2000));
   const done = (await call('GET', `/watch/result?job=${r.job}`)).json;
-  assert.deepStrictEqual(done, { ok: true, heard: 'slow question', kind: 'answer', text: 'echo: slow question' });
+  assert.deepStrictEqual(noRate(done), { ok: true, heard: 'slow question', kind: 'answer', text: 'echo: slow question' });
 });
 
 test('last reply: the watch can collect what it missed while it was closed', async (t) => {
@@ -467,7 +515,7 @@ test('result also works as POST {job}', async (t) => {
   assert.strictEqual((await call('POST', '/watch/result', { job: r.job })).json.kind, 'working');
   await new Promise(res => setTimeout(res, 2000));
   const done = (await call('POST', '/watch/result', { job: r.job })).json;
-  assert.deepStrictEqual(done, { ok: true, heard: 'slow question', kind: 'answer', text: 'echo: slow question' });
+  assert.deepStrictEqual(noRate(done), { ok: true, heard: 'slow question', kind: 'answer', text: 'echo: slow question' });
 });
 
 test('hermes down -> plain words', async (t) => {

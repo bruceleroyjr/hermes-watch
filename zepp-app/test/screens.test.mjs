@@ -16,6 +16,14 @@ test('a long spoken reply keeps how many clips it has', () => {
     { screen: 'answer', heard: '', text: 'Long...', speech: 's3', speechParts: 2 })
 })
 
+test('an answer keeps its rate id (thumbs up / down); a notice without one has none', () => {
+  assert.deepStrictEqual(screenFor({ ok: true, kind: 'answer', text: 'Sunny.', rate: 'r1', speech: 's1' }),
+    { screen: 'answer', heard: '', text: 'Sunny.', speech: 's1', rate: 'r1' })
+  assert.strictEqual('rate' in screenFor({ ok: true, kind: 'answer', text: 'New session started.' }), false)
+  const saved = { screen: 'answer', heard: '', text: 'Sunny.', rate: 'r1', rated: 'down' }
+  assert.deepStrictEqual(resumeFor({ at: NOW - 60 * 1000, model: saved }, NOW), { show: saved }) // the tap is remembered on reopen
+})
+
 test('approval card keeps approve; working keeps the relay note', () => {
   assert.deepStrictEqual(screenFor({ ok: true, kind: 'confirm', approve: true, text: 'Claude Code wants to change files', id: 'a1' }),
     { screen: 'confirm', heard: '', text: 'Claude Code wants to change files', id: 'a1', approve: true })

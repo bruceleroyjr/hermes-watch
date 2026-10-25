@@ -133,6 +133,10 @@ All but `/health` need `Authorization: Bearer <token>`.
 - `POST /watch/diag` `{from, events}` -> one-line status reports into `relay.log`; the watch and phone only
   send them when `zepp-app/shared/debug.js` sets `DIAG = true` (handy because the phone's logs can't be read
   from the PC)
+- `POST /watch/rate` `{rate, kind: up|down|none}` -> `{ok, kind}`: the thumbs up / down under an
+  answer. Answers from Hermes and PC health carry a `rate` id (kept 24 h); each tap is appended to
+  `ratings.jsonl` (git-ignored) with its question and reply; `none` = the same thumb tapped again (undo),
+  so the latest line per id counts. Use the file to review answers or feed your own coaching step.
 - `GET /health` -> `{ok, stt, hermes}`
 
 ## Security notes

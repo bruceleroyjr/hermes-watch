@@ -12,6 +12,8 @@
 //   whose answer goes back to Hermes as the next turn.
 // - Answers within WATCH_DEADLINE_MS (12 s; the Zepp app on the iPhone lost replies that took
 //   20 s or more) come back directly; slower ones become a job the watch polls with GET /watch/result.
+// - Answers carry a rate id; the watch's thumbs up / down go to POST /watch/rate and into
+//   ratings.jsonl (question, reply and tap), e.g. for reviewing or coaching the assistant.
 //
 // Exposed tailnet-only: tailscale serve --bg --https=8453 http://127.0.0.1:8796
 const http = require('http');
@@ -33,6 +35,8 @@ const PC_HEALTH_TIMEOUT_MS = 12000;
 const MISHEARD_HEALTH = /\b(pc|computer)\W+help check\b/i; // Whisper heard "PC, help check."
 const DEFAULT_DEADLINE_MS = 12000; // the iPhone Zepp app lost replies that took 20 s or more
 const MAX_BODY = 3_000_000;
+const RATE_KEEP_MS = 24 * 60 * 60 * 1000; // an answer reopened the next morning can still be rated
+const RATE_KINDS = ['up', 'down', 'none']; // none = the same thumb tapped again (undo)
 
 function newSessionId(now = new Date()) {
   const d = now.toISOString().slice(0, 10).replace(/-/g, '');
@@ -80,6 +84,7 @@ function createServer(opts) {
   const cancelRestart = opts.cancelRestart || cancelPcRestart;
   const deadlineMs = opts.deadlineMs || DEFAULT_DEADLINE_MS;
   const recordTurn = opts.recordTurn || (() => {});
+  const recordRating = opts.recordRating || (() => {});
   const tts = opts.tts || ((text) => postTts(new URL('/tts', opts.sttUrl), text));
   const notify = opts.notify || (() => {});
   const geocode = opts.geocode || reverseGeocode;
@@ -106,6 +111,27 @@ function createServer(opts) {
   function answered(heard, reply) {
     try { recordTurn({ ts: Date.now() / 1000, session: currentSession(), heard, reply: reply.text }); } catch { /* log only */ }
     return reply;
+  }
+
+  // Thumbs up / down: answers from Hermes and PC health get a
+  // rate id; POST /watch/rate saves a tap with its question and reply (latest tap per id wins).
+  // Errors, cards and "New session started." have nothing to rate.
+  const rateables = new Map(); // rate id -> {session, question, reply, at}
+  function rateable(reply, question) {
+    for (const [k, v] of rateables) if (Date.now() - v.at > RATE_KEEP_MS) rateables.delete(k);
+    const rate = crypto.randomBytes(6).toString('hex');
+    rateables.set(rate, { session: session ? session.id : '', question: question || '', reply: reply.text, at: Date.now() });
+    return { ...reply, rate };
+  }
+
+  function rateAnswer(body) {
+    const r = rateables.get(String(body.rate || ''));
+    if (!r) return { ok: false, error: 'That answer is too old to rate.' };
+    if (!RATE_KINDS.includes(body.kind)) return { ok: false, error: 'bad rating' };
+    const { session: sid, question, reply } = r;
+    try { recordRating({ ts: Date.now() / 1000, rate: String(body.rate), kind: body.kind, session: sid, question, reply }); } catch { /* log only */ }
+    log(`  rated ${body.kind}: ${question.slice(0, 80)}`);
+    return { ok: true, kind: body.kind };
   }
 
   // A Hermes turn, streamed: the text is collected, and approval requests (Claude Code edits and
@@ -180,11 +206,12 @@ function createServer(opts) {
     }
     const { text, confirm } = splitConfirm(r.text);
     const body = truncateForHud(formatForHud(text), WATCH_CHAR_BUDGET);
-    if (!confirm) return { ok: true, heard, kind: 'answer', text: body };
+    const question = heard || 'Yes (to a Yes/No card)';
+    if (!confirm) return rateable({ ok: true, heard, kind: 'answer', text: body }, question);
     const kind = confirmKind(heard, confirm);
     if (kind !== 'card') {
       log(`  unasked CONFIRM ${kind === 'drop' ? 'dropped' : 'shown as text'}: ${confirm.slice(0, 80)}`);
-      return { ok: true, heard, kind: 'answer', text: kind === 'plain' && body ? `${body}\n${confirm}` : body || confirm };
+      return rateable({ ok: true, heard, kind: 'answer', text: kind === 'plain' && body ? `${body}\n${confirm}` : body || confirm }, question);
     }
     const id = actions.createPending({ kind: 'hermes', question: confirm });
     return { ok: true, heard, kind: 'confirm', text: body ? `${body}\n${confirm}` : confirm, id, ttlMs: actions.HERMES_CARD_TTL_MS };
@@ -320,7 +347,7 @@ function createServer(opts) {
       const text = formatPcHealth(await pcHealth()); // not gathered -> Hermes answers instead
       if (text) {
         log(`  -> pc health ${Date.now() - started}ms`);
-        return answered(heard, { ok: true, heard, kind: 'answer', text });
+        return answered(heard, rateable({ ok: true, heard, kind: 'answer', text }, heard));
       }
     }
     const action = actions.parseAction(heard);
@@ -455,7 +482,7 @@ function createServer(opts) {
     if (req.method === 'GET' && url.pathname === '/watch/last') {
       return send(200, last ? { ...last.reply, ago_ms: Date.now() - last.at } : { ok: true, kind: 'none' });
     }
-    if (req.method !== 'POST' || !['/watch/ask', '/watch/confirm', '/watch/result', '/watch/diag'].includes(url.pathname)) return send(404, { ok: false, error: 'not found' });
+    if (req.method !== 'POST' || !['/watch/ask', '/watch/confirm', '/watch/result', '/watch/diag', '/watch/rate'].includes(url.pathname)) return send(404, { ok: false, error: 'not found' });
     const chunks = [];
     let size = 0;
     req.on('data', (c) => { size += c.length; if (size <= MAX_BODY) chunks.push(c); });
@@ -474,6 +501,7 @@ function createServer(opts) {
         return send(200, { ok: true });
       }
       if (url.pathname === '/watch/result') return send(200, result(String(body.job || ''), body.speak));
+      if (url.pathname === '/watch/rate') return send(200, rateAnswer(body)); // latest tap wins, so no rid
       // The phone retries a request whose reply got lost with the same rid; it gets the same
       // reply (waiting for it if still running), so Hermes and actions run once.
       const key = typeof body.rid === 'string' && body.rid ? `${url.pathname} ${body.rid}` : '';
@@ -633,6 +661,8 @@ if (require.main === module) {
     deadlineMs: Number(process.env.WATCH_DEADLINE_MS) || DEFAULT_DEADLINE_MS,
     log,
     recordTurn: e => fs.appendFile(process.env.WATCH_TURNS_FILE || path.join(__dirname, 'turns.jsonl'),
+      `${JSON.stringify(e)}\n`, () => {}),
+    recordRating: e => fs.appendFile(process.env.WATCH_RATINGS_FILE || path.join(__dirname, 'ratings.jsonl'),
       `${JSON.stringify(e)}\n`, () => {}),
     notify,
   }).listen(port, '127.0.0.1', () => log(`watch relay listening on 127.0.0.1:${port}`));

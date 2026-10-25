@@ -11,3 +11,4 @@ node_modules/
 zepp-app/dist/
 stt/.venv/
 __pycache__/
+ratings.jsonl

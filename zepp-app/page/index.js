@@ -61,6 +61,8 @@ const GREEN = 0x1e8449
 const GREY = 0x5d6d7e
 const BLUE = 0x2471a3
 const VOICE_W = 158 // = round(466 * 0.34), the voice icon images' width
+const RATE_W = 132 // thumbs up / down images (tools/rate-icons.py)
+const RATE_H = 72
 
 // Waiting animation: a ring of dots round the screen edge with a chasing head (shared/spinner.js).
 const RING_N = 16
@@ -365,6 +367,7 @@ Page(
       this.stopAnim()
       for (const w of this.state.widgets) hmUI.deleteWidget(w)
       this.state.widgets = []
+      this.state.rateRow = null
       const talk = () => this.onTalk()
       let y = Math.round(H * 0.1)
       if (m.screen === 'idle') {
@@ -397,6 +400,8 @@ Page(
         y = this.text(y + 20, m.heard, 24, 0x999999)
         y = this.text(y + 10, m.text, 32, m.screen === 'error' ? 0xff7b6b : 0xffffff)
         if (m.voiceNote) y = this.text(y + 6, m.voiceNote, 20, 0xf5b041)
+        if (m.rate) y = this.rateButtons(y + 24, m)
+        if (m.rateNote) y = this.text(y + 6, m.rateNote, 20, 0xf5b041)
         y = this.button(y + 30, 'TALK', GREEN, talk)
         // TALK continues the conversation; New chat drops it (Hermes forgets the earlier turns).
         const bw = Math.round(W * 0.34)
@@ -577,6 +582,54 @@ Page(
       try {
         this.request({ method: 'diag', params: { events } }, { timeout: 10000 }).catch(() => {})
       } catch (e) {}
+    },
+
+    // ------------------------------------------------------------------ rating
+    // Thumbs up / down under an answer: the relay saves the tap (with question and reply) to
+    // ratings.jsonl. The tapped thumb is solid yellow; tapping it again takes it back.
+    rateButtons(y, m) {
+      const gap = 20
+      const left = Math.round((W - 2 * RATE_W - gap) / 2)
+      const row = { y, widgets: [] }
+      for (const [kind, x] of [['up', left], ['down', left + RATE_W + gap]]) {
+        row.widgets.push(this.add(hmUI.widget.BUTTON, {
+          x, y, w: RATE_W, h: RATE_H, normal_src: `rate-${kind}${m.rated === kind ? '-on' : ''}.png`, press_src: `rate-${kind}-press.png`,
+          click_func: () => this.rateAnswer(kind),
+        }))
+      }
+      this.state.rateRow = row
+      return y + RATE_H
+    },
+
+    rateAnswer(kind) {
+      const m = this.model
+      if (!m || m.screen !== 'answer' || !m.rate) return
+      const before = m.rated || ''
+      const rated = before === kind ? '' : kind
+      this.setRated(m, rated)
+      const failed = (note) => {
+        const now = this.model
+        if (!now || now.rate !== m.rate || (now.rated || '') !== rated) return // moved on, or tapped again
+        this.show({ ...now, rated: before, rateNote: `Rating not saved: ${note}` })
+      }
+      this.phoneRequest({ method: 'rate', params: { rate: m.rate, kind: rated || 'none' } }, { timeout: 20000 })
+        .then((r) => { if (!r || !r.ok) failed((r && r.error) || 'no reply') })
+        .catch((e) => failed(phoneError(e)))
+    },
+
+    // Only the two thumbs are redrawn (after this click returns: deleting the pressed button inside its
+    // own callback would crash the page), so a long answer stays scrolled where it was.
+    setRated(m, rated) {
+      this.model = { ...m, rated, rateNote: '' }
+      this.save(this.model)
+      const row = this.state.rateRow
+      if (m.rateNote || !row) return this.show(this.model) // the note goes: full redraw
+      this.state.timers.push(setTimeout(() => {
+        if (this.state.rateRow !== row) return // the page was redrawn meanwhile
+        for (const w of row.widgets) hmUI.deleteWidget(w)
+        this.state.widgets = this.state.widgets.filter((w) => !row.widgets.includes(w))
+        this.rateButtons(row.y, this.model)
+      }, 10))
     },
 
     // ------------------------------------------------------------------ voice

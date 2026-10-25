@@ -14,7 +14,8 @@ export function screenFor(reply) {
   if (reply.kind === 'working') {
     return { screen: 'working', heard, text: 'Still working on it...', job: reply.job, ...(reply.note ? { note: reply.note } : {}) }
   }
-  return { screen: 'answer', heard, text: reply.text || '', ...speech }
+  // rate: the relay's id for the thumbs up / down under the answer (none on errors and notices)
+  return { screen: 'answer', heard, text: reply.text || '', ...speech, ...(reply.rate ? { rate: reply.rate } : {}) }
 }
 
 // Reopening the app (the watch closes it when the screen times out) brings back the last
