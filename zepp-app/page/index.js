@@ -137,6 +137,17 @@ function readPiece({ start, length }) {
   }
 }
 
+// A text size scaled by the watch's Text size setting; the size as given on firmware
+// without getSysFontSize.
+function sp(size) {
+  try {
+    const s = typeof hmUI.getSysFontSize === 'function' ? hmUI.getSysFontSize(size) : size
+    return s > 0 ? Math.round(s) : size
+  } catch (e) {
+    return size
+  }
+}
+
 function textHeight(text, size) {
   if (!text) return 0
   try {
@@ -332,7 +343,8 @@ Page(
       return w
     },
 
-    text(y, text, size, color) {
+    text(y, text, baseSize, color) {
+      const size = sp(baseSize)
       const h = textHeight(text, size)
       this.add(hmUI.widget.TEXT, {
         x: MARGIN, y, w: TEXT_W, h, text, text_size: size, color,
@@ -343,7 +355,7 @@ Page(
 
     button(y, text, color, onClick, w = Math.round(W * 0.5), x = Math.round((W - w) / 2)) {
       this.add(hmUI.widget.BUTTON, {
-        x, y, w, h: 80, radius: 40, text, text_size: 30, normal_color: color, press_color: 0x333333,
+        x, y, w, h: 80, radius: 40, text, text_size: Math.min(sp(30), 44), normal_color: color, press_color: 0x333333,
         click_func: onClick,
       })
       return y + 80
@@ -407,17 +419,20 @@ Page(
       const shownAt = Date.now()
       const dots = RING.map((p) => this.add(hmUI.widget.CIRCLE, { center_x: p.x, center_y: p.y, radius: DOT_R, color: spin.dim }))
       this.add(hmUI.widget.IMG, { x: Math.round((W - 124) / 2), y: 72, src: 'icon.png' })
+      const labelSize = sp(32)
+      const clockSize = sp(22)
       const label = this.add(hmUI.widget.TEXT, {
-        x: MARGIN, y: 206, w: TEXT_W, h: 44, text: `${word()}.`, text_size: 32, color: spin.head,
+        x: MARGIN, y: 206, w: TEXT_W, h: labelSize + 12, text: `${word()}.`, text_size: labelSize, color: spin.head,
         align_h: hmUI.align.CENTER_H,
       })
       const since = this.state.waitSince || Date.now()
+      const clockY = 206 + labelSize + 14
       const clock = this.add(hmUI.widget.TEXT, {
-        x: MARGIN, y: 252, w: TEXT_W, h: 30, text: elapsedText(Date.now() - since), text_size: 22, color: 0x888888,
+        x: MARGIN, y: clockY, w: TEXT_W, h: clockSize + 8, text: elapsedText(Date.now() - since), text_size: clockSize, color: 0x888888,
         align_h: hmUI.align.CENTER_H,
       })
       const heard = (m.heard || '').length > 70 ? `${m.heard.slice(0, 67)}...` : m.heard || ''
-      let y = 286
+      let y = clockY + clockSize + 12
       if (heard) y = this.text(y, heard, 20, 0x999999)
       if (m.note) y = this.text(y, m.note, 20, SPIN.working.head) // "you can close the app" after an Approve
       if (m.screen === 'working' || m.resume) this.button(Math.max(y + 8, 326), 'Cancel', GREY, () => this.cancelPoll(), Math.round(W * 0.4))
