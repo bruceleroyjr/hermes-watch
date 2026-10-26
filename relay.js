@@ -20,6 +20,7 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 const { isResetCommand, formatForHud, truncateForHud, parsePcRestartCommand, cancelPcRestart,
   isPcHealthRequest, gatherPcHealthAsync } = require('./lib/voice-common');
@@ -618,7 +619,7 @@ if (require.main === module) {
   const LOG_FILE = path.join(__dirname, 'relay.log');
   const log = line => fs.appendFile(LOG_FILE, `${new Date().toISOString()} ${line}\n`, () => {});
   const config = readJson(process.env.WATCH_CONFIG || path.join(__dirname, 'config.json')) || {};
-  const envFile = path.join(process.env.LOCALAPPDATA || '', 'hermes', '.env');
+  const envFile = path.join(process.env.HERMES_HOME || path.join(os.homedir(), '.hermes'), '.env'); // Hermes' own home rule
   let envText = '';
   try { envText = fs.readFileSync(envFile, 'utf8'); } catch { /* below */ }
   const envValue = (name) => {

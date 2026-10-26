@@ -2,6 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { isResetCommand } = require('../lib/voice-common');
+const { formatPcHealth } = require('../lib/pc-health');
 
 test('new-session commands, including how Whisper hears them', () => {
   for (const said of ['start new session', 'Start a new session.', 'Start the new session.', 'please start new session',
@@ -16,4 +17,32 @@ test('questions that only mention the words are not a reset', () => {
     'tell me about the new chat feature', 'What is the price of Bitcoin?']) {
     assert.strictEqual(isResetCommand(said), false, said);
   }
+});
+
+// The PC health / restart shortcuts shell out on Windows and macOS only. Elsewhere they answer at once
+// instead of throwing. process.platform is swapped for the test and put back after.
+function onPlatform(platform, fn) {
+  const original = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true, writable: true });
+  try { return fn(); } finally { Object.defineProperty(process, 'platform', original); }
+}
+
+test('PC health on an unsupported platform resolves to {} without shelling out', async () => {
+  const { gatherPcHealthAsync } = require('../lib/voice-common');
+  const raw = await onPlatform('freebsd', () => gatherPcHealthAsync(1));
+  assert.strictEqual(raw, '{}');
+  assert.strictEqual(formatPcHealth(raw), null);
+});
+
+test('PC restart on an unsupported platform says so instead of throwing', () => {
+  const { restartPc, cancelPcRestart } = require('../lib/voice-common');
+  onPlatform('freebsd', () => {
+    assert.strictEqual(restartPc(), "PC restart isn't supported on this platform.");
+    assert.strictEqual(cancelPcRestart(), "PC restart isn't supported on this platform.");
+  });
+});
+
+test('macOS cancel with no countdown running', () => {
+  const { cancelPcRestart } = require('../lib/voice-common');
+  assert.strictEqual(onPlatform('darwin', () => cancelPcRestart()), 'No PC restart was pending.');
 });

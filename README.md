@@ -83,8 +83,10 @@ read and hear a long answer); cards for actions the relay runs itself (car comma
 ## Requirements
 
 - Amazfit Active 2 (or similar Zepp OS 4 watch) and the Zepp app on your phone
-- A Windows PC running [Hermes Agent](https://github.com/NousResearch/hermes-agent) with its API server on
-- Node.js 20+, Python 3.10+
+- A Windows or macOS PC running [Hermes Agent](https://github.com/NousResearch/hermes-agent) with its API
+  server on
+- Node.js 20+, Python 3.10+. On macOS the PC health and restart features use `bash` and `osascript`,
+  both built in, so nothing extra to install.
 - [Tailscale](https://tailscale.com) on the PC and the phone
 - The [Zeus CLI](https://docs.zepp.com/docs/guides/tools/cli/) (`npm i -g @zeppos/zeus-cli`) and a Zepp
   developer account
@@ -98,12 +100,19 @@ read and hear a long answer); cards for actions the relay runs itself (car comma
    the watch app and the relay share it. Never commit `config.json`.
 2. **Speech-to-text.**
    ```
+   # Windows
    python -m venv stt\.venv
    stt\.venv\Scripts\pip install -r stt\requirements.txt
    stt\.venv\Scripts\python stt\stt_worker.py
+
+   # macOS
+   python3 -m venv stt/.venv
+   stt/.venv/bin/pip install -r stt/requirements.txt
+   stt/.venv/bin/python stt/stt_worker.py
    ```
-3. **Relay.** Put Hermes' `API_SERVER_KEY` in `%LOCALAPPDATA%\hermes\.env` (the relay reads it from there,
-   along with `TELEGRAM_BOT_TOKEN` / `TELEGRAM_HOME_CHANNEL` for build results), then:
+3. **Relay.** Put Hermes' `API_SERVER_KEY` in `~/.hermes/.env` (or `$HERMES_HOME/.env` if you moved
+   Hermes' home; the relay reads it from there, along with `TELEGRAM_BOT_TOKEN` / `TELEGRAM_HOME_CHANNEL`
+   for build results), then:
    ```
    node relay.js
    tailscale serve --bg --https=8453 http://127.0.0.1:8796
@@ -117,7 +126,18 @@ read and hear a long answer); cards for actions the relay runs itself (car comma
    ```
    Scan the QR code in the Zepp app.
 
-Run the PC parts as scheduled tasks if you want them to start with Windows.
+Run the PC parts as scheduled tasks if you want them to start with Windows. On macOS the equivalent is a
+LaunchAgent: a plist in `~/Library/LaunchAgents/` per part, loaded with `launchctl load`, for example:
+```
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>hermes.watch.relay</string>
+  <key>ProgramArguments</key><array><string>/usr/local/bin/node</string><string>/path/to/hermes-watch/relay.js</string></array>
+  <key>WorkingDirectory</key><string>/path/to/hermes-watch</string>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+</dict></plist>
+```
 
 ## Relay API
 
@@ -160,6 +180,10 @@ All but `/health` need `Authorization: Bearer <token>`.
 - **Voice is silent or late**: set `DIAG = true` in `zepp-app/shared/debug.js`, reinstall, and read the
   `phone:` / `watch:` lines in `relay.log` (download, Bluetooth transfer, file arrived, player).
 - **Logs**: `relay.log` (every request), `stt/stt.log`.
+- **macOS: "restart the PC" counts down but nothing happens**: the first restart shows an Automation prompt
+  (Terminal or Node wanting to control System Events); allow it, or turn it on later in System Settings >
+  Privacy & Security > Automation. If "PC health check" is answered by Hermes instead of the relay, run
+  `bash lib/pc-health.sh` by hand and check that it prints one JSON object.
 
 ## Tests
 
